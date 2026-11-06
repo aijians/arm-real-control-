@@ -128,7 +128,9 @@
         1.2
       ],
       "final_speed_deg_s": 90.0,
-      "max_recovery_rounds": 3
+      "max_recovery_rounds": 3,
+      "overshoot_return_enabled": true,
+      "overshoot_return_speed_deg_s": 18.0
     }
   },
   "verification": {

@@ -58,6 +58,7 @@ class _MotionTrace:
         self.plan.update(waypoint_min_axis_step_deg=phase.get("waypoint_min_axis_step_deg"),
                          protected_micro_steps=phase.get("protected_micro_steps", []))
         self.actions = deque(maxlen=self.MAX_ACTIONS)
+        self.sent_actions = deque(maxlen=self.MAX_ACTIONS)
         self.action_count = 0
         self.counts = {m["name"]: {"sent": 0, "skipped": 0, "send_failed": 0}
                        for m in motors}
@@ -97,6 +98,7 @@ class _MotionTrace:
             self.first_actions.setdefault(name, event)
             if event["status"] == "sent":
                 self.last_sent[name] = event
+                self.sent_actions.append(event)
             self.actions.append(event)
         except Exception as exc:
             self.recording_error = type(exc).__name__
@@ -160,6 +162,8 @@ class _MotionTrace:
                 "query_counts": dict(self.query_counts), "last_queries": dict(self.last_queries),
                 "reply_counts": dict(self.reply_counts), "last_replies": dict(self.last_replies),
                 "actions": list(self.actions),
+                "sent_actions": list(self.sent_actions),
+                "dropped_sent_actions": sum(v["sent"] for v in self.counts.values())-len(self.sent_actions),
                 "timestamp_definition": "host_monotonic_not_motor_sample_time",
                 "sent_definition": "serial_write_completed_not_motor_execution_ack"}
 
@@ -697,7 +701,7 @@ class MotorPair:
                       external_retract=False, axis_min_speed_deg_s=None,
                       speed_tiers=None, command_speed_caps_deg_s=None,
                       recovery_bias_modes=None, recovery_validator=None, adaptive_mode=False,
-                      stuck_upshift_axes=None, stuck_angle_boost_axes=None, nominal_retry_axes=None):
+                      stuck_upshift_axes=None, stuck_angle_boost_axes=None, nominal_retry_axes=None, nominal_return_axes=None):
         sent = 0
         with self._io_lock:
             if self._halt_event.is_set():
@@ -830,8 +834,9 @@ class MotorPair:
                 # node, independently of the healthy joint. Recall early while
                 # approaching its band, or whenever it has crossed that node.
                 old_bias = self._settling_bias_centi[i]
+                nominal_return = bool(nominal_return_axes is not None and nominal_return_axes[i])
                 axis_bias_retraction = bool(adaptive_mode and nominal_q_rad is None
-                    and old_bias and (bias_mode == -2 or abs(nominal_delta) <= tolerance_motor_deg + 1e-9
+                    and old_bias and (nominal_return or bias_mode == -2 or abs(nominal_delta) <= tolerance_motor_deg + 1e-9
                         or nominal_delta * old_bias <= 0
                         or (measured_speed > still_motor_speed
                             and abs(nominal_delta) <= tolerance_motor_deg + .25*motor["ratio"])))
@@ -856,7 +861,7 @@ class MotorPair:
                     pending_retracted = False
                     retract_latch_centi = None
                     latch_locked = False
-                if axis_bias_retraction:
+                if axis_bias_retraction or nominal_return:
                     pending_bias = 0
                     pending_retracted = True
                     retract_latch_centi = nominal_target
@@ -876,8 +881,8 @@ class MotorPair:
                     # Record the bounded target actually sent, not an unclipped
                     # requested offset. Subsequent .2-degree steps start here.
                     pending_bias = target - nominal_target
-                if (adaptive_mode and (target != nominal_target or axis_bias_retraction)
-                        and (last_key is None or target != last_key[0])
+                if (adaptive_mode and (target != nominal_target or axis_bias_retraction or nominal_return)
+                        and (last_key is None or target != last_key[0] or nominal_return)
                         and (recovery_validator is None or not recovery_validator(i, target))):
                     if self._motion_trace is not None:
                         self._motion_trace.record_action({"motor": motor["name"], "status": "skipped",
@@ -918,8 +923,11 @@ class MotorPair:
                 stationary_nominal_retry = bool(nominal_retry and stationary_confirmed
                     and last_key is not None and target == nominal_target
                     and direction == last_key[1] and pending_bias == 0)
+                stationary_nominal_return = bool(nominal_return and stationary_confirmed
+                    and last_key is not None and target == nominal_target and pending_bias == 0
+                    and abs(nominal_delta) > tolerance_motor_deg+1e-9)
                 if (stationary_stuck_upshift or stationary_stuck_angle_boost
-                        or stationary_bias_retraction or stationary_nominal_retry):
+                        or stationary_bias_retraction or stationary_nominal_retry or stationary_nominal_return):
                     uncertainty = stationary_uncertainty
                 trace = self._motion_trace
                 event = None if trace is None else {
@@ -941,15 +949,21 @@ class MotorPair:
                     "axis_bias_retraction": axis_bias_retraction,
                     "stationary_bias_retraction": stationary_bias_retraction,
                     "stationary_nominal_retry": stationary_nominal_retry,
+                    "stationary_nominal_return": stationary_nominal_return,
                     "speed_feedback_age_s": (None if self._feedback[i].get("speed_stamp") is None
                                              else decision_at - self._feedback[i]["speed_stamp"]),
                 }
+                if nominal_return and not stationary_nominal_return:
+                    if trace is not None:
+                        trace.record_action({**event, "status": "skipped",
+                                             "reason": "waiting_stationary_nominal_return"})
+                    continue
                 if nominal_retry and not stationary_nominal_retry:
                     if trace is not None:
                         trace.record_action({**event, "status": "skipped",
                                              "reason": "waiting_stationary_nominal_retry"})
                     continue
-                settling_change = speed_tier < 0 and tier_changed
+                settling_change = speed_tier < 0 and tier_changed and not stationary_nominal_return
                 if settling_change and ((not at_endpoint and not adaptive_mode) or last_key is None
                         or target != last_key[0] or direction != last_key[1]
                         or not stationary_confirmed
@@ -975,7 +989,7 @@ class MotorPair:
                 # Prevent mid-trajectory reverse A6 commands when an axis slightly
                 # leads its interpolated reference along the planned motion direction.
                 if (not at_endpoint and planned_motor_dir is not None
-                        and not stationary_bias_retraction and direction != planned_motor_dir
+                        and not (stationary_bias_retraction or stationary_nominal_return) and direction != planned_motor_dir
                         and (abs(delta) <= lead_motor_deg or measured_speed > still_motor_speed)):
                     if trace is not None:
                         trace.record_action({**event, "status": "skipped",
@@ -985,7 +999,7 @@ class MotorPair:
                 # A6 correction while the motor is still decelerating or already
                 # within angle tolerance of the target.
                 if ((axis_end or (planned_directions is not None and planned_motor_dir is None))
-                        and not stationary_bias_retraction
+                        and not (stationary_bias_retraction or stationary_nominal_return)
                         and last_key is not None and direction != last_key[1]
                         and (abs(nominal_delta if axis_end else delta) <= tolerance_motor_deg
                              or measured_speed > still_motor_speed)):
@@ -1020,7 +1034,8 @@ class MotorPair:
                     # A6 direction. Only a discrete tier transition may update
                     # an acknowledged target once; raw speed rounding is ignored.
                     same_direction_tier_change = tier_changed and direction == last_key[1]
-                    if direction != last_key[1] or not (stalled_unacked or same_direction_tier_change or stationary_nominal_retry):
+                    if ((direction != last_key[1] and not stationary_nominal_return)
+                            or not (stalled_unacked or same_direction_tier_change or stationary_nominal_retry or stationary_nominal_return)):
                         if trace is not None:
                             trace.record_action({**event, "status": "skipped",
                                                  "reason": "unchanged_active_target"})
@@ -1194,6 +1209,8 @@ class MotorPair:
                 return True
 
             def commands_ready():
+                if adaptive and not recovery.node_ready():
+                    return False
                 for i in active_indices:
                     key = self._last_targets[i]
                     if key is None:
@@ -1280,7 +1297,7 @@ class MotorPair:
                         <= .85*point_tols[i]*self.motors[i]["ratio"]+1e-9)
                     for i in active_indices)
                 changed = (cursor.advance(now, state["q_rad"], state["axis_stamp_monotonic_s"])
-                           if bias_recovered and pending_cart is None else False)
+                           if bias_recovered and pending_cart is None and (not adaptive or recovery.node_ready()) else False)
                 target, elapsed = cursor.target(), cursor.elapsed
                 if changed:
                     recovery.node_changed(now, cursor.index) if adaptive else recovery.node_changed(now)
@@ -1392,6 +1409,7 @@ class MotorPair:
                             and request["kind"] == "angle_up" and request.get("diagnosis") == "stuck")
                             for request in recovery.pending],
                         nominal_retry_axes=(recovery.nominal_retry_axes() if adaptive else None),
+                        nominal_return_axes=(recovery.nominal_return_axes() if adaptive else None),
                         recovery_bias_modes=(recovery.angle_modes() if adaptive else None),
                         recovery_validator=recovery_angle_safe,
                         axis_min_speed_deg_s=speed_floors, speed_tiers=speed_tiers,

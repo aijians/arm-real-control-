@@ -61,6 +61,25 @@ class WaypointRoundsTests(unittest.TestCase):
         r._retry_or_exhaust(0,1.,-1.2)
         self.assertFalse(r.wrote(0,3,60.,1.1,bias=-1.2));self.assertEqual(r.round_index,1)
         self.assertTrue(r.wrote(0,3,60.,1.2,bias=0.));self.assertEqual(r.round_index,2)
+    def test_two_waypoints_each_can_use_their_own_second_round(self):
+        class PerPointLoad(VirtualDrive):
+            def advance(self,seconds):
+                old=self.q[0];moved=self.has_moved[0]
+                super().advance(seconds)
+                trace=self.pair._motion_trace
+                index=0 if trace is None else trace.execution.get('waypoint_index',0)
+                if index not in (1,2):return
+                target=15700 if index==1 else 15500
+                final=sum(int.from_bytes(w[9:13],'little')==9000
+                          and int.from_bytes(w[6:9],'little')==target for _,_,_,w in self.a6(0))
+                if final<2:
+                    self.q[0],self.velocity[0],self.running[0],self.has_moved[0]=old,0.,False,moved
+        d=PerPointLoad(settings=three_round_config())
+        result=d.run(phase([[159.,20.],[157.,20.],[155.,20.]],motion_recovery_geometry=scene_context()))
+        r=result['motion_diagnostics']['execution']['speed_recovery']
+        started=[(e['waypoint_index'],e['recovery_round']) for e in r['events'] if e['event']=='node_recovery_round_started']
+        self.assertEqual(started,[(1,1),(1,2),(2,1),(2,2)])
+        self.assertEqual(d.unsafe_directions,[])
     def test_production_has_three_rounds(self):
         c=json.loads((Path(__file__).resolve().parents[1]/'config/robot.json').read_text())
         self.assertEqual(c['hardware']['motion_recovery']['max_recovery_rounds'],3)
