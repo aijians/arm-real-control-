@@ -93,11 +93,11 @@
       "speed_steps_deg_s": [
         18.0,
         30.0,
-        45.0,
-        60.0
+        60.0,
+        90.0
       ],
-      "trigger_s": 2.0,
-      "observe_s": 2.0,
+      "trigger_s": 0.5,
+      "observe_s": 0.5,
       "total_recovery_s": 24.0,
       "max_upshifts": 4,
       "max_no_gain_windows": 2,
@@ -115,13 +115,19 @@
       "max_downshifts": 2,
       "max_angle_changes": 3,
       "angle_step_deg": 0.2,
-      "angle_max_deg": 0.6,
+      "angle_max_deg": 1.2,
       "downshift_steps_deg_s": [
         2.0,
         6.0,
         18.0,
         30.0
-      ]
+      ],
+      "angle_steps_deg": [
+        0.2,
+        0.6,
+        1.2
+      ],
+      "final_speed_deg_s": 90.0
     }
   },
   "verification": {

@@ -831,19 +831,25 @@ class MotorPair:
                 # approaching its band, or whenever it has crossed that node.
                 old_bias = self._settling_bias_centi[i]
                 axis_bias_retraction = bool(adaptive_mode and nominal_q_rad is None
-                    and old_bias and (abs(nominal_delta) <= tolerance_motor_deg + 1e-9
+                    and old_bias and (bias_mode == -2 or abs(nominal_delta) <= tolerance_motor_deg + 1e-9
                         or nominal_delta * old_bias <= 0
                         or (measured_speed > still_motor_speed
                             and abs(nominal_delta) <= tolerance_motor_deg + .25*motor["ratio"])))
-                if bias_mode and nominal_q_rad is None and not axis_bias_retraction:
+                if bias_mode in (-1, 1) and nominal_q_rad is None and not axis_bias_retraction:
                     step = self.motion_policy["angle_step_deg"] * motor["ratio"]
                     cap = self.motion_policy["angle_max_deg"] * motor["ratio"]
+                    levels = self.motion_policy['angle_steps_deg']
+                    magnitude = abs(self._settling_bias_centi[i])/100
                     if bias_mode > 0:
                         sign = 1 if nominal_delta > 0 else -1
-                        desired_bias = sign * min(cap, abs(self._settling_bias_centi[i])/100 + step)
+                        next_bias = (next((v*motor['ratio'] for v in levels
+                            if v*motor['ratio'] > magnitude+.005), cap) if levels else magnitude+step)
+                        desired_bias = sign * min(cap, next_bias)
                     elif self._settling_bias_centi[i]:
                         old_bias = self._settling_bias_centi[i]/100
-                        desired_bias = math.copysign(max(0., abs(old_bias)-step), old_bias)
+                        smaller = (max((v*motor['ratio'] for v in levels
+                            if v*motor['ratio'] < magnitude-.005), default=0.) if levels else max(0., magnitude-step))
+                        desired_bias = math.copysign(smaller, old_bias)
                     else:
                         desired_bias = math.copysign(min(step, .5*abs(nominal_delta)), -nominal_delta)
                     pending_bias = round(desired_bias*100)

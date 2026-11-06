@@ -55,9 +55,9 @@ def recovery_settings(hardware):
     steps = settings["speed_steps_deg_s"]
     if (not isinstance(steps, (list, tuple)) or not 2 <= len(steps) <= 4
             or any(type(x) not in (int, float) or not math.isfinite(x) for x in steps)
-            or not 0 < steps[0] or steps[-1] > 60
+            or not 0 < steps[0] or steps[-1] > 90
             or any(a >= b for a, b in zip(steps, steps[1:]))):
-        raise ValueError("speed_recovery requires 2..4 increasing speed steps at most 60 deg/s")
+        raise ValueError("speed_recovery requires 2..4 increasing speed steps at most 90 deg/s")
     if (settings["max_upshifts"] > len(steps)
             or not max(settings["trigger_s"], settings["observe_s"]) <= settings["total_recovery_s"] <= 30
             or not hardware.get("min_speed_deg_s", 2) <= settings["settling_speed_deg_s"] <= steps[-1]

@@ -7,6 +7,7 @@ from .recovery import SpeedRecovery
 DEFAULTS = {
     'enabled': False, 'max_downshifts': 2, 'max_angle_changes': 3,
     'angle_step_deg': .2, 'angle_max_deg': .6,
+    'angle_steps_deg': None, 'final_speed_deg_s': None,
     'cartesian_step_mm': .2, 'cartesian_max_mm': .4,
     'ordinary_speed_steps_deg_s': [6., 12., 18.],
     'downshift_steps_deg_s': [2., 6., 18., 30.],
@@ -23,7 +24,7 @@ def motion_policy_settings(hardware):
     for key in ('max_downshifts', 'max_angle_changes'):
         if type(result[key]) is not int or not 1 <= result[key] <= 4:
             raise ValueError('invalid motion_recovery.'+key)
-    for key, maximum in (('angle_step_deg', .4), ('angle_max_deg', .6),
+    for key, maximum in (('angle_step_deg', .4), ('angle_max_deg', 1.2),
                          ('cartesian_step_mm', .3), ('cartesian_max_mm', .5)):
         value = result[key]
         if type(value) not in (int, float) or not math.isfinite(value) or not 0 < value <= maximum:
@@ -37,6 +38,19 @@ def motion_policy_settings(hardware):
                 or any(type(v) not in (int, float) or not math.isfinite(v) or v <= 0 or v > maximum for v in values)
                 or any(a >= b for a,b in zip(values, values[1:]))):
             raise ValueError('invalid motion_recovery.'+key)
+    levels = result['angle_steps_deg']
+    if levels is not None and (not isinstance(levels, list) or not 1 <= len(levels) <= 4
+            or any(type(v) not in (int, float) or not math.isfinite(v)
+                   or not 0 < v <= result['angle_max_deg'] for v in levels)
+            or any(a >= b for a,b in zip(levels, levels[1:]))):
+        raise ValueError('invalid motion_recovery.angle_steps_deg')
+    final = result['final_speed_deg_s']
+    steps = hardware.get('speed_recovery', {}).get('speed_steps_deg_s', [18.,30.])
+    if final is not None and (type(final) not in (int,float) or not math.isfinite(final)
+            or final != 90. or final != steps[-1]
+            or levels is None or abs(levels[-1]-result['angle_max_deg']) > 1e-9
+            or result['max_angle_changes'] < len(levels)):
+        raise ValueError('invalid motion_recovery.final_speed_deg_s')
     return result
 
 
@@ -57,6 +71,8 @@ class MotionRecovery(SpeedRecovery):
         self.downshifts = [0]*n
         self.angle_changes = [0]*n
         self.last_bias = [0.]*n
+        self.final_speed_ready = [False]*n
+        self.final_speed_used = [False]*n
 
     def eligible(self, axis):
         return self.policy['enabled'] and self.phase in (
@@ -71,10 +87,12 @@ class MotionRecovery(SpeedRecovery):
     def node_changed(self, now):
         super().node_changed(now)
         self.diagnoses = ['normal']*len(self.motors)
+        self.final_speed_ready = [False]*len(self.motors)
 
     def angle_modes(self):
         return [0 if request is None else
-                (1 if request['kind'] == 'angle_up' else (-1 if request['kind'] == 'angle_down' else 0))
+                (1 if request['kind'] == 'angle_up' else (-1 if request['kind'] == 'angle_down' else
+                 (-2 if request['kind'] == 'bias_clear' else 0)))
                 for request in self.pending]
 
     def classify(self, axis, now, state, goal, tolerance, progress_at):
@@ -125,11 +143,23 @@ class MotionRecovery(SpeedRecovery):
             actual_speed = key[2]/100.
             if diagnosis == 'stuck':
                 steps = self.settings['speed_steps_deg_s']
+                final = self.policy['final_speed_deg_s']
                 candidates = [(tier, speed) for tier, speed in enumerate(steps, 1)
-                              if speed > actual_speed+.005]
+                              if speed > actual_speed+.005 and speed != final]
                 if candidates and self.upshifts[axis] < self.settings['max_upshifts']:
                     tier, speed = candidates[0]
                     self._request(axis, now, tier, speed, 'up')
+                elif final is not None and not self.final_speed_used[axis]:
+                    # The last tier is gated by an actually written maximum
+                    # bias, a no-progress window, and a separate nominal recall.
+                    if self.final_speed_ready[axis] and abs(biases[axis]) < .005:
+                        self._request(axis, now, len(steps), final, 'up')
+                    elif abs(biases[axis]) >= self.policy['angle_max_deg']*self.motors[axis]['ratio']-.005:
+                        self._request(axis, now, self.speed_tier[axis],
+                                      self.axis_min_speed_deg_s[axis], 'bias_clear')
+                        self.pending[axis]['bias_before'] = biases[axis]
+                    else:
+                        self._angle_or_exhaust(axis, now, biases[axis], 'angle_up')
                 else:
                     self._angle_or_exhaust(axis, now, biases[axis], 'angle_up')
             else:
@@ -146,7 +176,8 @@ class MotionRecovery(SpeedRecovery):
         return None
 
     def _angle_or_exhaust(self, axis, now, bias, kind):
-        if self.angle_changes[axis] < self.policy['max_angle_changes']:
+        if (self.angle_changes[axis] < self.policy['max_angle_changes']
+                and not (kind == 'angle_up' and self.final_speed_used[axis])):
             self._request(axis, now, self.speed_tier[axis], self.axis_min_speed_deg_s[axis], kind)
             self.pending[axis]['bias_before'] = bias
         else:
@@ -157,6 +188,19 @@ class MotionRecovery(SpeedRecovery):
 
     def wrote(self, axis, tier, speed, at, bias=None):
         request = self.pending[axis]
+        if request is not None and request['kind'] == 'bias_clear':
+            if bias is None or abs(bias) >= .005 or at < request['at']:
+                return False
+            self.last_bias[axis] = 0.
+            self.pending[axis] = None
+            self.final_speed_ready[axis] = True
+            # Nominal recall was already preceded by a full no-progress
+            # window. Re-evaluate feedback before the next (separate) write.
+            self.evaluation_at[axis] = at-self.settings['observe_s']
+            self.history[axis].clear()
+            self.event(at, 'bias_cleared_before_final_speed', axis,
+                       bias_motor_deg=0., previous_bias_motor_deg=request['bias_before'])
+            return True
         if request is not None and request['kind'].startswith('angle_'):
             if bias is None or at < request['at'] or abs(bias-request['bias_before']) < .005:
                 return False
@@ -172,6 +216,10 @@ class MotionRecovery(SpeedRecovery):
         committed = super().wrote(axis, tier, speed, at)
         if committed and down:
             self.downshifts[axis] += 1
+        if committed and self.policy['final_speed_deg_s'] is not None and speed >= self.policy['final_speed_deg_s']-.005:
+            self.final_speed_used[axis] = True
+            self.final_speed_ready[axis] = False
+            self.event(at, 'final_speed_written', axis, speed_deg_s=speed)
         if committed:
             self.history[axis].clear()
         return committed
@@ -179,7 +227,10 @@ class MotionRecovery(SpeedRecovery):
     def snapshot(self):
         return {**super().snapshot(), 'policy': 'classify_speed_then_angle',
                 'diagnoses': list(self.diagnoses), 'downshifts': list(self.downshifts),
-                'angle_changes': list(self.angle_changes), 'angle_bias_motor_deg': list(self.last_bias)}
+                'angle_changes': list(self.angle_changes), 'angle_bias_motor_deg': list(self.last_bias),
+                'angle_steps_deg': self.policy['angle_steps_deg'],
+                'final_speed_deg_s': self.policy['final_speed_deg_s'],
+                'final_speed_used': list(self.final_speed_used)}
 
 
 def contact_angle_step(target_for_lead, nominal, current_lead, modes,
