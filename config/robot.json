@@ -127,7 +127,8 @@
         0.6,
         1.2
       ],
-      "final_speed_deg_s": 90.0
+      "final_speed_deg_s": 90.0,
+      "max_recovery_rounds": 3
     }
   },
   "verification": {

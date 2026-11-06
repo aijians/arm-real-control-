@@ -697,7 +697,7 @@ class MotorPair:
                       external_retract=False, axis_min_speed_deg_s=None,
                       speed_tiers=None, command_speed_caps_deg_s=None,
                       recovery_bias_modes=None, recovery_validator=None, adaptive_mode=False,
-                      stuck_upshift_axes=None, stuck_angle_boost_axes=None):
+                      stuck_upshift_axes=None, stuck_angle_boost_axes=None, nominal_retry_axes=None):
         sent = 0
         with self._io_lock:
             if self._halt_event.is_set():
@@ -914,8 +914,12 @@ class MotorPair:
                     and abs(pending_bias) > abs(old_bias)
                     and (target-last_key[0])*(1 if direction == 0 else -1) > 0)
                 stationary_bias_retraction = bool(axis_bias_retraction and stationary_confirmed)
+                nominal_retry = bool(nominal_retry_axes is not None and nominal_retry_axes[i])
+                stationary_nominal_retry = bool(nominal_retry and stationary_confirmed
+                    and last_key is not None and target == nominal_target
+                    and direction == last_key[1] and pending_bias == 0)
                 if (stationary_stuck_upshift or stationary_stuck_angle_boost
-                        or stationary_bias_retraction):
+                        or stationary_bias_retraction or stationary_nominal_retry):
                     uncertainty = stationary_uncertainty
                 trace = self._motion_trace
                 event = None if trace is None else {
@@ -936,9 +940,15 @@ class MotorPair:
                     "stationary_stuck_angle_boost": stationary_stuck_angle_boost,
                     "axis_bias_retraction": axis_bias_retraction,
                     "stationary_bias_retraction": stationary_bias_retraction,
+                    "stationary_nominal_retry": stationary_nominal_retry,
                     "speed_feedback_age_s": (None if self._feedback[i].get("speed_stamp") is None
                                              else decision_at - self._feedback[i]["speed_stamp"]),
                 }
+                if nominal_retry and not stationary_nominal_retry:
+                    if trace is not None:
+                        trace.record_action({**event, "status": "skipped",
+                                             "reason": "waiting_stationary_nominal_retry"})
+                    continue
                 settling_change = speed_tier < 0 and tier_changed
                 if settling_change and ((not at_endpoint and not adaptive_mode) or last_key is None
                         or target != last_key[0] or direction != last_key[1]
@@ -1010,7 +1020,7 @@ class MotorPair:
                     # A6 direction. Only a discrete tier transition may update
                     # an acknowledged target once; raw speed rounding is ignored.
                     same_direction_tier_change = tier_changed and direction == last_key[1]
-                    if direction != last_key[1] or not (stalled_unacked or same_direction_tier_change):
+                    if direction != last_key[1] or not (stalled_unacked or same_direction_tier_change or stationary_nominal_retry):
                         if trace is not None:
                             trace.record_action({**event, "status": "skipped",
                                                  "reason": "unchanged_active_target"})
@@ -1134,7 +1144,8 @@ class MotorPair:
             stage, stage_started = "tracking", started
             endpoint_at = endpoint_due = settling_deadline = endpoint_deadline = holding_at = None
             total_deadline = (started + points[-1][0] + self.config["move_timeout_margin_s"]
-                              + len(points)*self.config["no_progress_s"])
+                              + len(points)*(self.recovery_config["total_recovery_s"] if adaptive
+                                             else self.config["no_progress_s"]))
             cart_meta = phase.get("cartesian_compensation")
             # The adaptive policy uses independent temporary joint targets.
             # Keep line metadata for nominal planning and face checks only.
@@ -1272,7 +1283,7 @@ class MotorPair:
                            if bias_recovered and pending_cart is None else False)
                 target, elapsed = cursor.target(), cursor.elapsed
                 if changed:
-                    recovery.node_changed(now)
+                    recovery.node_changed(now, cursor.index) if adaptive else recovery.node_changed(now)
                     self._settling_bias_centi = [0, 0]
                     self._settling_bias_retracted = [False, False]
                     cart_lead = 0.
@@ -1380,6 +1391,7 @@ class MotorPair:
                         stuck_angle_boost_axes=[bool(adaptive and request is not None
                             and request["kind"] == "angle_up" and request.get("diagnosis") == "stuck")
                             for request in recovery.pending],
+                        nominal_retry_axes=(recovery.nominal_retry_axes() if adaptive else None),
                         recovery_bias_modes=(recovery.angle_modes() if adaptive else None),
                         recovery_validator=recovery_angle_safe,
                         axis_min_speed_deg_s=speed_floors, speed_tiers=speed_tiers,

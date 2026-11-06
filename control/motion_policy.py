@@ -8,6 +8,7 @@ DEFAULTS = {
     'enabled': False, 'max_downshifts': 2, 'max_angle_changes': 3,
     'angle_step_deg': .2, 'angle_max_deg': .6,
     'angle_steps_deg': None, 'final_speed_deg_s': None,
+    'max_recovery_rounds': 1,
     'cartesian_step_mm': .2, 'cartesian_max_mm': .4,
     'ordinary_speed_steps_deg_s': [6., 12., 18.],
     'downshift_steps_deg_s': [2., 6., 18., 30.],
@@ -21,7 +22,7 @@ def motion_policy_settings(hardware):
     result = {**DEFAULTS, **raw}
     if type(result['enabled']) is not bool:
         raise ValueError('motion_recovery.enabled must be bool')
-    for key in ('max_downshifts', 'max_angle_changes'):
+    for key in ('max_downshifts', 'max_angle_changes', 'max_recovery_rounds'):
         if type(result[key]) is not int or not 1 <= result[key] <= 4:
             raise ValueError('invalid motion_recovery.'+key)
     for key, maximum in (('angle_step_deg', .4), ('angle_max_deg', 1.2),
@@ -51,11 +52,13 @@ def motion_policy_settings(hardware):
             or levels is None or abs(levels[-1]-result['angle_max_deg']) > 1e-9
             or result['max_angle_changes'] < len(levels)):
         raise ValueError('invalid motion_recovery.final_speed_deg_s')
+    if result['max_recovery_rounds'] > 3:
+        raise ValueError('motion_recovery.max_recovery_rounds must be 1..3')
     return result
 
 
 class MotionRecovery(SpeedRecovery):
-    """One budget per move; per-axis diagnosis precedes every intervention.
+    """A bounded budget per waypoint; speed/bias steps belong to one round.
 
     All active axes, directions and phases share the same configured tiers.
     Legacy ordinary/cartesian-mm keys are read for snapshot compatibility;
@@ -73,6 +76,10 @@ class MotionRecovery(SpeedRecovery):
         self.last_bias = [0.]*n
         self.final_speed_ready = [False]*n
         self.final_speed_used = [False]*n
+        self.node_index = 0
+        self.round_index = 0
+        self.total_rounds_started = 0
+        self.move_recovery_started_at = None
 
     def eligible(self, axis):
         return self.policy['enabled'] and self.phase in (
@@ -84,15 +91,77 @@ class MotionRecovery(SpeedRecovery):
                 for floor, tier in zip(floors, tiers)]
         return floors, tiers, caps
 
-    def node_changed(self, now):
+    def event(self, now, event, axis=None, **values):
+        values.setdefault('waypoint_index', self.node_index)
+        values.setdefault('recovery_round', max(1, self.round_index))
+        super().event(now, event, axis, **values)
+
+    def _begin(self, now):
+        if self.move_recovery_started_at is None:
+            self.move_recovery_started_at = now
+        super()._begin(now)
+
+    def _reset_round_actions(self, now):
+        n = len(self.motors)
+        for i in range(n):
+            self.cancel_pending(i, now, 'recovery_round_changed')
+            self.history[i].clear()
+        self.upshifts = [0]*n
+        self.downshifts = [0]*n
+        self.downshifted = [False]*n
+        self.angle_changes = [0]*n
+        self.no_gain_windows = [0]*n
+        self.final_speed_ready = [False]*n
+        self.final_speed_used = [False]*n
+        self.evaluation_at = [now]*n
+
+    def node_changed(self, now, node_index=None):
         super().node_changed(now)
+        self.node_index = self.node_index+1 if node_index is None else node_index
+        self._reset_round_actions(now)
         self.diagnoses = ['normal']*len(self.motors)
-        self.final_speed_ready = [False]*len(self.motors)
+        self.last_bias = [0.]*len(self.motors)
+        self.round_index = 0
+        self.started_at = self.deadline = None
+        final = self.policy['final_speed_deg_s']
+        if final is not None:
+            steps = self.settings['speed_steps_deg_s']
+            for i, floor in enumerate(self.axis_min_speed_deg_s):
+                if floor >= final-.005:
+                    self.axis_min_speed_deg_s[i] = steps[-2]
+                    self.speed_tier[i] = len(steps)-1
+        self.event(now, 'waypoint_recovery_budget_reset', recovery_round=0,
+                   max_rounds=self.policy['max_recovery_rounds'])
+
+    def _round_written(self, at):
+        if self.round_index == 0:
+            self.round_index = 1
+            self.total_rounds_started += 1
+            self.event(at, 'node_recovery_round_started')
+
+    def nominal_retry_axes(self):
+        return [r is not None and r['kind'] == 'round_restart' for r in self.pending]
+
+    def _retry_or_exhaust(self, axis, now, bias):
+        if max(1, self.round_index) >= self.policy['max_recovery_rounds']:
+            return axis
+        # Retain the achieved ordinary floor. The final 90 tier is recalled
+        # to the ordinary ceiling before any new biased command is allowed.
+        steps = self.settings['speed_steps_deg_s']
+        ordinary = [v for v in steps if v != self.policy['final_speed_deg_s']]
+        floor = min(max(self.base_cap, self.axis_min_speed_deg_s[axis]), ordinary[-1])
+        tier = steps.index(floor)+1 if floor in steps else 0
+        self._request(axis, now, tier, floor, 'round_restart')
+        self.pending[axis].update(bias_before=bias, next_round=max(1,self.round_index)+1,
+                                  diagnosis=self.diagnoses[axis])
+        self.event(now, 'node_recovery_round_retry_requested', axis,
+                   next_round=self.pending[axis]['next_round'])
+        return None
 
     def angle_modes(self):
         return [0 if request is None else
                 (1 if request['kind'] == 'angle_up' else (-1 if request['kind'] == 'angle_down' else
-                 (-2 if request['kind'] == 'bias_clear' else 0)))
+                 (-2 if request['kind'] in ('bias_clear','round_restart') else 0)))
                 for request in self.pending]
 
     def classify(self, axis, now, state, goal, tolerance, progress_at):
@@ -127,13 +196,15 @@ class MotionRecovery(SpeedRecovery):
                     self.cancel_pending(axis, now, 'diagnosis_changed')
             if diagnosis == 'normal':
                 request = self.pending[axis]
-                if (request is not None and request['kind'] in ('up','angle_up')
+                if (request is not None and request['kind'] in ('up','angle_up','round_restart')
                         and progress_at[axis] > request['at']+1e-9):
                     self.cancel_pending(axis, now, 'fresh_progress_before_write')
                 continue
             self.recovering[axis] = True
             if self.deadline is not None and now >= self.deadline:
                 return axis
+            if any(r is not None and r['kind'] == 'round_restart' for r in self.pending):
+                continue
             if self.pending[axis] is not None or now-self.evaluation_at[axis] < self.settings['observe_s']:
                 continue
             key = keys[axis]
@@ -172,7 +243,7 @@ class MotionRecovery(SpeedRecovery):
             if self.pending[axis] is not None:
                 self.pending[axis]['diagnosis'] = diagnosis
             if self.no_gain_windows[axis] >= self.settings['max_no_gain_windows']:
-                return axis
+                return self._retry_or_exhaust(axis, now, biases[axis])
         return None
 
     def _angle_or_exhaust(self, axis, now, bias, kind):
@@ -188,9 +259,21 @@ class MotionRecovery(SpeedRecovery):
 
     def wrote(self, axis, tier, speed, at, bias=None):
         request = self.pending[axis]
+        if request is not None and request['kind'] == 'round_restart':
+            if bias is None or abs(bias) >= .005 or at < request['at']:
+                return False
+            next_round = request['next_round']
+            self.pending[axis] = None
+            self._reset_round_actions(at)
+            self.round_index = next_round
+            self.total_rounds_started += 1
+            self.last_bias[axis] = 0.
+            self.event(at, 'node_recovery_round_started', axis)
+            return True
         if request is not None and request['kind'] == 'bias_clear':
             if bias is None or abs(bias) >= .005 or at < request['at']:
                 return False
+            self._round_written(at)
             self.last_bias[axis] = 0.
             self.pending[axis] = None
             self.final_speed_ready[axis] = True
@@ -204,6 +287,7 @@ class MotionRecovery(SpeedRecovery):
         if request is not None and request['kind'].startswith('angle_'):
             if bias is None or at < request['at'] or abs(bias-request['bias_before']) < .005:
                 return False
+            self._round_written(at)
             self.angle_changes[axis] += 1
             self.last_bias[axis] = bias
             self.pending[axis] = None
@@ -214,6 +298,8 @@ class MotionRecovery(SpeedRecovery):
             return True
         down = request is not None and request['kind'] == 'settle'
         committed = super().wrote(axis, tier, speed, at)
+        if committed:
+            self._round_written(at)
         if committed and down:
             self.downshifts[axis] += 1
         if committed and self.policy['final_speed_deg_s'] is not None and speed >= self.policy['final_speed_deg_s']-.005:
@@ -230,7 +316,12 @@ class MotionRecovery(SpeedRecovery):
                 'angle_changes': list(self.angle_changes), 'angle_bias_motor_deg': list(self.last_bias),
                 'angle_steps_deg': self.policy['angle_steps_deg'],
                 'final_speed_deg_s': self.policy['final_speed_deg_s'],
-                'final_speed_used': list(self.final_speed_used)}
+                'final_speed_used': list(self.final_speed_used),
+                'waypoint_index': self.node_index, 'recovery_round': self.round_index,
+                'max_recovery_rounds': self.policy['max_recovery_rounds'],
+                'total_rounds_started': self.total_rounds_started,
+                'recovery_budget_scope': 'waypoint',
+                'move_recovery_started_at': self.move_recovery_started_at}
 
 
 def contact_angle_step(target_for_lead, nominal, current_lead, modes,
