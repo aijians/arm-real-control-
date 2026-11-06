@@ -18,7 +18,7 @@ import time
 from .trajectory import WaypointCursor, GoalQualification
 from .kinematics import PlanarArm
 from .recovery import SpeedRecovery, recovery_settings
-from .motion_policy import MotionRecovery, motion_policy_settings, contact_angle_step
+from .motion_policy import MotionRecovery, motion_policy_settings
 
 from .protocol import (angle_from_reply, extract_frame, make_frame,
                        position_frame, state_from_reply)
@@ -697,7 +697,7 @@ class MotorPair:
                       external_retract=False, axis_min_speed_deg_s=None,
                       speed_tiers=None, command_speed_caps_deg_s=None,
                       recovery_bias_modes=None, recovery_validator=None, adaptive_mode=False,
-                      stuck_upshift_axes=None):
+                      stuck_upshift_axes=None, stuck_angle_boost_axes=None):
         sent = 0
         with self._io_lock:
             if self._halt_event.is_set():
@@ -778,7 +778,8 @@ class MotorPair:
                 active_in_band = (last_key is not None and
                     abs(last_key[0] / 100 - nominal_motor_deg) <= .85 * tolerance_motor_deg + 1e-9)
                 latch_locked = axis_end and pending_retracted and active_in_band
-                if axis_end and nominal_q_rad is None and last_key is not None and not latch_locked:
+                if (not adaptive_mode and axis_end and nominal_q_rad is None
+                        and last_key is not None and not latch_locked):
                     max_hold_offset_centi = max(1, round(0.45 * tolerance_motor_deg * 100))
                     active_offset_deg = abs(last_key[0] / 100 - nominal_motor_deg)
                     approaching_band = (
@@ -825,7 +826,16 @@ class MotorPair:
                 # Explicit angle stage follows exhausted speed adjustments;
                 # it cannot run on the old elapsed-time bias trigger.
                 bias_mode = 0 if recovery_bias_modes is None else recovery_bias_modes[i]
-                if bias_mode and nominal_q_rad is None:
+                # A temporary drive target must be recalled against the ORIGINAL
+                # node, independently of the healthy joint. Recall early while
+                # approaching its band, or whenever it has crossed that node.
+                old_bias = self._settling_bias_centi[i]
+                axis_bias_retraction = bool(adaptive_mode and nominal_q_rad is None
+                    and old_bias and (abs(nominal_delta) <= tolerance_motor_deg + 1e-9
+                        or nominal_delta * old_bias <= 0
+                        or (measured_speed > still_motor_speed
+                            and abs(nominal_delta) <= tolerance_motor_deg + .25*motor["ratio"])))
+                if bias_mode and nominal_q_rad is None and not axis_bias_retraction:
                     step = self.motion_policy["angle_step_deg"] * motor["ratio"]
                     cap = self.motion_policy["angle_max_deg"] * motor["ratio"]
                     if bias_mode > 0:
@@ -840,6 +850,11 @@ class MotorPair:
                     pending_retracted = False
                     retract_latch_centi = None
                     latch_locked = False
+                if axis_bias_retraction:
+                    pending_bias = 0
+                    pending_retracted = True
+                    retract_latch_centi = nominal_target
+                    latch_locked = False
                 if nominal_q_rad is not None:
                     target = self._clamp_motor_centi(motor, round(command_motor_deg * 100))
                     pending_bias = target - nominal_target
@@ -851,7 +866,11 @@ class MotorPair:
                 else:
                     target = self._clamp_motor_centi(
                         motor, nominal_target + (pending_bias if axis_end else 0))
-                if (adaptive_mode and target != nominal_target
+                if adaptive_mode and nominal_q_rad is None:
+                    # Record the bounded target actually sent, not an unclipped
+                    # requested offset. Subsequent .2-degree steps start here.
+                    pending_bias = target - nominal_target
+                if (adaptive_mode and (target != nominal_target or axis_bias_retraction)
                         and (last_key is None or target != last_key[0])
                         and (recovery_validator is None or not recovery_validator(i, target))):
                     if self._motion_trace is not None:
@@ -881,7 +900,16 @@ class MotorPair:
                 if (tier_changed or (adaptive_mode and (target != nominal_target
                         or (last_key is not None and last_key[0] != nominal_target)))):
                     uncertainty = max(uncertainty, moving_uncertainty)
-                if stationary_stuck_upshift:
+                stationary_stuck_angle_boost = bool(
+                    adaptive_mode and stuck_angle_boost_axes is not None
+                    and stuck_angle_boost_axes[i] and not axis_bias_retraction
+                    and stationary_confirmed and last_key is not None
+                    and direction == last_key[1] and target != last_key[0]
+                    and abs(pending_bias) > abs(old_bias)
+                    and (target-last_key[0])*(1 if direction == 0 else -1) > 0)
+                stationary_bias_retraction = bool(axis_bias_retraction and stationary_confirmed)
+                if (stationary_stuck_upshift or stationary_stuck_angle_boost
+                        or stationary_bias_retraction):
                     uncertainty = stationary_uncertainty
                 trace = self._motion_trace
                 event = None if trace is None else {
@@ -899,6 +927,9 @@ class MotorPair:
                     "axis_min_speed_deg_s": speed_floor, "command_speed_cap_deg_s": command_cap,
                     "angle_feedback_age_s": age, "direction_uncertainty_deg": uncertainty,
                     "stationary_stuck_upshift": bool(stationary_stuck_upshift),
+                    "stationary_stuck_angle_boost": stationary_stuck_angle_boost,
+                    "axis_bias_retraction": axis_bias_retraction,
+                    "stationary_bias_retraction": stationary_bias_retraction,
                     "speed_feedback_age_s": (None if self._feedback[i].get("speed_stamp") is None
                                              else decision_at - self._feedback[i]["speed_stamp"]),
                 }
@@ -928,7 +959,7 @@ class MotorPair:
                 # Prevent mid-trajectory reverse A6 commands when an axis slightly
                 # leads its interpolated reference along the planned motion direction.
                 if (not at_endpoint and planned_motor_dir is not None
-                        and direction != planned_motor_dir
+                        and not stationary_bias_retraction and direction != planned_motor_dir
                         and (abs(delta) <= lead_motor_deg or measured_speed > still_motor_speed)):
                     if trace is not None:
                         trace.record_action({**event, "status": "skipped",
@@ -938,6 +969,7 @@ class MotorPair:
                 # A6 correction while the motor is still decelerating or already
                 # within angle tolerance of the target.
                 if ((axis_end or (planned_directions is not None and planned_motor_dir is None))
+                        and not stationary_bias_retraction
                         and last_key is not None and direction != last_key[1]
                         and (abs(nominal_delta if axis_end else delta) <= tolerance_motor_deg
                              or measured_speed > still_motor_speed)):
@@ -1097,12 +1129,16 @@ class MotorPair:
             endpoint_at = endpoint_due = settling_deadline = endpoint_deadline = holding_at = None
             total_deadline = (started + points[-1][0] + self.config["move_timeout_margin_s"]
                               + len(points)*self.config["no_progress_s"])
-            meta = phase.get("cartesian_compensation")
+            cart_meta = phase.get("cartesian_compensation")
+            # The adaptive policy uses independent temporary joint targets.
+            # Keep line metadata for nominal planning and face checks only.
+            # Legacy non-adaptive execution retains its historical line mode.
+            meta = None if adaptive else cart_meta
             cart_arm = None
-            if meta is not None:
-                if phase.get("phase") not in ("push", "push_correction", "approach", "withdraw") or meta.get("allow_endpoint_extension"):
+            if cart_meta is not None:
+                if phase.get("phase") not in ("push", "push_correction", "approach", "withdraw") or cart_meta.get("allow_endpoint_extension"):
                     raise ValueError("unsupported Cartesian compensation policy")
-                cart_arm = PlanarArm(meta["geometry"])
+                cart_arm = PlanarArm(cart_meta["geometry"])
             cart_lead = 0.
             cart_retracted = False
             pending_cart = None
@@ -1134,7 +1170,7 @@ class MotorPair:
                         if any(not m["limits_deg"][0] <= math.degrees(value) <= m["limits_deg"][1]
                                for m,value in zip(self.motors,q)):
                             return False
-                        if cart_arm is not None and cart_arm.world_normal(q,meta["direction"])[0] * (1 if meta["direction"] == "+x" else -1) <= 0:
+                        if cart_arm is not None and cart_arm.world_normal(q,cart_meta["direction"])[0] * (1 if cart_meta["direction"] == "+x" else -1) <= 0:
                             return False
                         if geometry_scene is not None and geometry_scene.check(q, geometry_context["sliders"], geometry_context["contact"]):
                             return False
@@ -1149,6 +1185,8 @@ class MotorPair:
                             return False
                         continue
                     nominal = self._motor_deg(self.motors[i], math.degrees(points[-1][1][i]))
+                    if adaptive and self._settling_bias_centi[i] != 0:
+                        return False
                     if abs(key[0]/100-nominal) > .85*self.config["angle_tolerance_deg"]*self.motors[i]["ratio"]+1e-9:
                         return False
                     if state["axis_stamp_monotonic_s"][i] < max(endpoint_at, self._last_target_sent_at[i]):
@@ -1177,6 +1215,7 @@ class MotorPair:
                     "active_command_acknowledged": list(self._last_target_acked),
                     "settling_bias_deg": [b/100 for b in self._settling_bias_centi],
                     "settling_bias_retracted": list(self._settling_bias_retracted),
+                    "bias_policy": "independent_axis_error_boost" if adaptive else "legacy",
                     "cartesian_bias_lead_mm": cart_lead,
                     "cartesian_bias_retracted": cart_retracted,
                     "cartesian_command_pending": pending_cart is not None,
@@ -1218,7 +1257,7 @@ class MotorPair:
                 # node just because measured position briefly entered its band.
                 point_tols = cursor.tolerances_deg
                 bias_recovered = all(self._settling_bias_centi[i] == 0
-                    or (self._last_targets[i] is not None
+                    or (not adaptive and self._last_targets[i] is not None
                         and abs(self._last_targets[i][0]/100-self._motor_deg(
                             self.motors[i], math.degrees(cursor.target()[i])))
                         <= .85*point_tols[i]*self.motors[i]["ratio"]+1e-9)
@@ -1298,24 +1337,7 @@ class MotorPair:
                         and any(abs(math.degrees(state["speed_rad_s"][i])) > self.config["still_speed_deg_s"]
                                 for i in active_indices)
                         and all(errors[i] <= tolerances[i] + .25 for i in active_indices))
-                    angle_modes = recovery.angle_modes() if adaptive else [0, 0]
-                    angle_request = any(angle_modes)
-                    all_still = all(abs(math.degrees(state["speed_rad_s"][i])) <= self.config["still_speed_deg_s"]
-                                    for i in active_indices)
-                    if adaptive and angle_request and all_still:
-                        edge = [b-a for a,b in zip(meta["start_xy_mm"],meta["end_xy_mm"])]
-                        length = math.hypot(*edge)
-                        center = cart_arm.slider_center(target,meta["direction"])
-                        progress = (0. if length <= 1e-9 else sum((v-a)*d/length
-                            for v,a,d in zip(center,meta["start_xy_mm"],edge)))
-                        progress = min(length,max(0.,progress))
-                        new_lead = contact_angle_step(
-                            lambda lead:self._cartesian_target(meta,cart_arm,target,lead),
-                            target,cart_lead,angle_modes,self.motion_policy["angle_step_deg"],
-                            self.motion_policy["angle_max_deg"],progress,length-progress)
-                        cart_retracted = False
-                        pending_cart = None
-                    elif in_band or approaching or cart_retracted:
+                    if in_band or approaching or cart_retracted:
                         new_lead = 0.
                         external_retract = cart_retracted or cart_lead > 0 or any(self._settling_bias_centi)
                         pending_cart = None
@@ -1349,7 +1371,10 @@ class MotorPair:
                         stuck_upshift_axes=[bool(adaptive and request is not None
                             and request["kind"] == "up" and request.get("diagnosis") == "stuck")
                             for request in recovery.pending],
-                        recovery_bias_modes=(recovery.angle_modes() if adaptive and meta is None and phase.get("phase") == "free" else None),
+                        stuck_angle_boost_axes=[bool(adaptive and request is not None
+                            and request["kind"] == "angle_up" and request.get("diagnosis") == "stuck")
+                            for request in recovery.pending],
+                        recovery_bias_modes=(recovery.angle_modes() if adaptive else None),
                         recovery_validator=recovery_angle_safe,
                         axis_min_speed_deg_s=speed_floors, speed_tiers=speed_tiers,
                         command_speed_caps_deg_s=speed_caps,
@@ -1362,6 +1387,8 @@ class MotorPair:
                         if key is not None and self._last_target_sent_at[i] > previous_writes[i]:
                             committed = recovery.wrote(i, key[3] if len(key) > 3 else 0, key[2]/100.,
                                 self._last_target_sent_at[i], **({"bias": self._settling_bias_centi[i]/100} if adaptive else {}))
+                            if adaptive:
+                                recovery.last_bias[i] = self._settling_bias_centi[i]/100.
                             if committed:
                                 qualifier.reset_after_command()
                     if meta is not None:
