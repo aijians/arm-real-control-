@@ -1,0 +1,351 @@
+{
+  "scope": "Host offline angle/geometry flow with ideal motor and vision feedback. No hardware or physics simulation.",
+  "passed": true,
+  "cases": [
+    {
+      "name": "orange_round_trip",
+      "task": {
+        "intent": "push_round_trip",
+        "color": "橙",
+        "round_trips": 1
+      },
+      "status": "completed",
+      "reason": null,
+      "completed_round_trips": 1,
+      "elapsed_s": 1.9973,
+      "phase_count": 9,
+      "points": 381,
+      "free_routes": [
+        {
+          "route": "passage",
+          "planning_s": 0.6033
+        },
+        {
+          "route": "rail_entry",
+          "planning_s": 0.6898
+        },
+        {
+          "route": "direct",
+          "planning_s": 0.6039
+        }
+      ],
+      "final_q_deg": [
+        180.0,
+        0.0
+      ]
+    },
+    {
+      "name": "blue_round_trip_three",
+      "task": {
+        "intent": "push_round_trip",
+        "color": "蓝",
+        "round_trips": 3
+      },
+      "status": "completed",
+      "reason": null,
+      "completed_round_trips": 3,
+      "elapsed_s": 4.3134,
+      "phase_count": 25,
+      "points": 859,
+      "free_routes": [
+        {
+          "route": "direct",
+          "planning_s": 0.6265
+        },
+        {
+          "route": "rail_entry",
+          "planning_s": 0.3982
+        },
+        {
+          "route": "rail_entry",
+          "planning_s": 0.8161
+        },
+        {
+          "route": "rail_entry",
+          "planning_s": 0.3943
+        },
+        {
+          "route": "rail_entry",
+          "planning_s": 0.8185
+        },
+        {
+          "route": "rail_entry",
+          "planning_s": 0.403
+        },
+        {
+          "route": "direct",
+          "planning_s": 0.5602
+        }
+      ],
+      "final_q_deg": [
+        180.0,
+        0.0
+      ]
+    },
+    {
+      "name": "orange_distance_35",
+      "task": {
+        "intent": "push_distance",
+        "color": "橙",
+        "direction": "-x",
+        "distance_mm": 35
+      },
+      "status": "completed",
+      "reason": null,
+      "completed_round_trips": 0,
+      "elapsed_s": 1.1551,
+      "phase_count": 5,
+      "points": 253,
+      "free_routes": [
+        {
+          "route": "passage",
+          "planning_s": 0.584
+        },
+        {
+          "route": "direct",
+          "planning_s": 0.536
+        }
+      ],
+      "final_q_deg": [
+        180.0,
+        0.0
+      ]
+    },
+    {
+      "name": "blue_distance_20",
+      "task": {
+        "intent": "push_distance",
+        "color": "蓝",
+        "direction": "+x",
+        "distance_mm": 20
+      },
+      "status": "completed",
+      "reason": null,
+      "completed_round_trips": 0,
+      "elapsed_s": 1.3106,
+      "phase_count": 5,
+      "points": 270,
+      "free_routes": [
+        {
+          "route": "direct",
+          "planning_s": 0.6394
+        },
+        {
+          "route": "direct",
+          "planning_s": 0.6019
+        }
+      ],
+      "final_q_deg": [
+        180.0,
+        0.0
+      ]
+    },
+    {
+      "name": "orange_from_middle",
+      "task": {
+        "intent": "push_round_trip",
+        "color": "橙",
+        "round_trips": 1
+      },
+      "status": "completed",
+      "reason": null,
+      "completed_round_trips": 1,
+      "elapsed_s": 1.9637,
+      "phase_count": 9,
+      "points": 355,
+      "free_routes": [
+        {
+          "route": "passage",
+          "planning_s": 0.5831
+        },
+        {
+          "route": "rail_entry",
+          "planning_s": 0.6944
+        },
+        {
+          "route": "direct",
+          "planning_s": 0.59
+        }
+      ],
+      "final_q_deg": [
+        180.0,
+        0.0
+      ]
+    },
+    {
+      "name": "blue_from_middle",
+      "task": {
+        "intent": "push_round_trip",
+        "color": "蓝",
+        "round_trips": 1
+      },
+      "status": "completed",
+      "reason": null,
+      "completed_round_trips": 1,
+      "elapsed_s": 1.6442,
+      "phase_count": 9,
+      "points": 364,
+      "free_routes": [
+        {
+          "route": "direct",
+          "planning_s": 0.6063
+        },
+        {
+          "route": "rail_entry",
+          "planning_s": 0.4006
+        },
+        {
+          "route": "direct",
+          "planning_s": 0.5389
+        }
+      ],
+      "final_q_deg": [
+        180.0,
+        0.0
+      ]
+    },
+    {
+      "name": "hardware_orange_round_trip",
+      "task": {
+        "intent": "push_round_trip",
+        "color": "橙",
+        "round_trips": 1
+      },
+      "status": "completed",
+      "reason": null,
+      "completed_round_trips": 1,
+      "elapsed_s": 1.9135,
+      "phase_count": 9,
+      "points": 373,
+      "free_routes": [
+        {
+          "route": "passage",
+          "planning_s": 0.5142
+        },
+        {
+          "route": "rail_entry",
+          "planning_s": 0.6941
+        },
+        {
+          "route": "direct",
+          "planning_s": 0.6057
+        }
+      ],
+      "final_q_deg": [
+        180.0,
+        0.0
+      ]
+    },
+    {
+      "name": "橙_shift_-0.5",
+      "task": {
+        "intent": "push_to_end",
+        "color": "橙"
+      },
+      "status": "completed",
+      "reason": null,
+      "completed_round_trips": 0,
+      "elapsed_s": 1.1484,
+      "phase_count": 5,
+      "points": 263,
+      "free_routes": [
+        {
+          "route": "passage",
+          "planning_s": 0.5817
+        },
+        {
+          "route": "direct",
+          "planning_s": 0.5368
+        }
+      ],
+      "final_q_deg": [
+        180.0,
+        0.0
+      ]
+    },
+    {
+      "name": "蓝_shift_-0.5",
+      "task": {
+        "intent": "push_to_end",
+        "color": "蓝"
+      },
+      "status": "completed",
+      "reason": null,
+      "completed_round_trips": 0,
+      "elapsed_s": 1.2863,
+      "phase_count": 5,
+      "points": 294,
+      "free_routes": [
+        {
+          "route": "direct",
+          "planning_s": 0.632
+        },
+        {
+          "route": "direct",
+          "planning_s": 0.585
+        }
+      ],
+      "final_q_deg": [
+        180.0,
+        0.0
+      ]
+    },
+    {
+      "name": "橙_shift_+0.5",
+      "task": {
+        "intent": "push_to_end",
+        "color": "橙"
+      },
+      "status": "completed",
+      "reason": null,
+      "completed_round_trips": 0,
+      "elapsed_s": 1.1638,
+      "phase_count": 5,
+      "points": 265,
+      "free_routes": [
+        {
+          "route": "passage",
+          "planning_s": 0.5846
+        },
+        {
+          "route": "direct",
+          "planning_s": 0.544
+        }
+      ],
+      "final_q_deg": [
+        180.0,
+        0.0
+      ]
+    },
+    {
+      "name": "蓝_shift_+0.5",
+      "task": {
+        "intent": "push_to_end",
+        "color": "蓝"
+      },
+      "status": "completed",
+      "reason": null,
+      "completed_round_trips": 0,
+      "elapsed_s": 1.2771,
+      "phase_count": 5,
+      "points": 292,
+      "free_routes": [
+        {
+          "route": "direct",
+          "planning_s": 0.6257
+        },
+        {
+          "route": "direct",
+          "planning_s": 0.5826
+        }
+      ],
+      "final_q_deg": [
+        180.0,
+        0.0
+      ]
+    }
+  ],
+  "free_planning_s_max": 0.8185,
+  "push_wall_rejection": false,
+  "real_hardware_tested": false
+}

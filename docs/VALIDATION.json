@@ -1,0 +1,46 @@
+{
+  "release_date": "2026-10-27",
+  "scope": "Fixed Cartesian recipes, contact-independent physical envelopes, task video lifecycle and file runtime",
+  "unit_tests_passed": 127,
+  "offline_task_cases_passed": 11,
+  "free_planning_seconds_max_on_host": 0.8185,
+  "gazebo_started": false,
+  "board_connected": true,
+  "actual_hardware_motion_tested": false,
+  "actual_camera_recording_tested": false,
+  "push_wall_rejection": false,
+  "runtime_requires_stl_geos_astar": false,
+  "boot_service_included": false,
+  "planning_feedback": "ideal offline feedback, not physical verification",
+  "preapproach_world_x_mm": {
+    "+x": 5,
+    "-x": 2
+  },
+  "camera_fix": "Use Gst core caps with checked standard BGR row alignment; no GstVideo Python namespace required",
+  "board_synthetic_bgr_frame_verified": true,
+  "console_task_status_visible": true,
+  "board_motor_feedback_queries_passed": 30,
+  "board_motor_feedback_queries_total": 30,
+  "rs485_reply_gap_ms": 5,
+  "actual_camera_recording_observed_in_user_task": true,
+  "camera_frames_in_user_task": 77,
+  "physical_color_layout": "blue left, orange/yellow right; user confirmed both at endpoints",
+  "rail_x_correction": {
+    "scale": 1.1005390853591381,
+    "offset_mm": -2.8544965862446787,
+    "source": "2026-10-27 task b6c53fa18717481ba449fce31255a175; user confirmed blue left/orange right at mechanical endpoints; median of 92 frames using board OpenCV 4.11.0",
+    "nominal_anchors_mm": [
+      -39.71281347040295,
+      14.805922663734663
+    ],
+    "model_anchors_mm": [
+      -46.56,
+      13.44
+    ]
+  },
+  "endpoint_replay_used_for_fit": true,
+  "orange_corrected_endpoint_frames_within_tolerance": 92,
+  "endpoint_replay_frames": 92,
+  "blue_single_frame_peak_to_peak_mm": 2.735029650191336,
+  "endpoint_replay_detector_runtime": "board OpenCV 4.11.0"
+}

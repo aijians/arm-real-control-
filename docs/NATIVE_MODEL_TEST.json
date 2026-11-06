@@ -1,0 +1,44 @@
+{
+  "mode": "native_mini_model_only",
+  "same_instance_for_all_inputs": true,
+  "python": "/usr/bin/python3",
+  "hardware_access": false,
+  "tokenizer_backend": "pure",
+  "torch_threads": 2,
+  "load_s": 0.09405558699836547,
+  "items": [
+    {
+      "text": "把橙色滑杆向右推35毫米",
+      "task": {
+        "intent": "push_distance",
+        "color": "橙",
+        "direction": "+x",
+        "distance_mm": 35
+      },
+      "raw": "{\"intent\": \"push_distance\", \"color\": \"橙\", \"direction\": \"+x\", \"distance_mm\": 35}",
+      "generation_s": 0.15519543499976862
+    },
+    {
+      "text": "把蓝色滑杆推到另一端",
+      "task": {
+        "intent": "push_to_end",
+        "color": "蓝"
+      },
+      "raw": "{\"intent\": \"push_to_end\", \"color\": \"蓝\", \"direction\": \"other\"}",
+      "generation_s": 0.11309419800090836
+    },
+    {
+      "text": "把蓝色滑杆来回推动3次",
+      "task": {
+        "intent": "push_round_trip",
+        "color": "蓝",
+        "round_trips": 3
+      },
+      "raw": "{\"intent\": \"push_round_trip\", \"color\": \"蓝\", \"round_trips\": 3}",
+      "generation_s": 0.12590465499852144
+    }
+  ],
+  "forbidden_import_attempts": [],
+  "passed": true,
+  "total_s": 0.48873312099931354
+}

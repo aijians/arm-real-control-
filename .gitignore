@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.env
+.aws/
+.codex/
+input/
+output/
+runtime/
+videos/
+hermes_model/
+*.mp4
+*.zip
+*.tar.gz

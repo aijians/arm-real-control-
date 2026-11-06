@@ -1,0 +1,192 @@
+test_consecutive_reads_wait_for_new_sequence (test_camera.CameraTests) ... ok
+test_existing_video_is_not_overwritten (test_camera.CameraTests) ... ok
+test_health_checks_error_eos_and_stale_without_waiting (test_camera.CameraTests) ... ok
+test_missing_eos_is_reported_and_device_is_released (test_camera.CameraTests) ... ok
+test_nonstandard_buffer_layout_is_rejected_and_unmapped (test_camera.CameraTests) ... ok
+test_pixels_detach_before_unmap_and_honor_row_stride (test_camera.CameraTests) ... ok
+test_reader_records_bus_error_and_unblocks_waiters (test_camera.CameraTests) ... ok
+test_stale_or_pre_motion_frames_cannot_satisfy_read (test_camera.CameraTests) ... ok
+test_start_creates_one_tee_pipeline_with_separate_branches (test_camera.CameraTests) ... ok
+test_warmup_then_only_latest_frame_is_kept (test_camera.CameraTests) ... ok
+test_accepts_boundary_distance_and_count_values (test_language.LanguageTests) ... ok
+test_loads_once_and_reuses_model_for_each_task (test_language.LanguageTests) ... ok
+test_missing_model_entry_rejected (test_language.LanguageTests) ... ok
+test_native_tensor_and_pure_tokenizer_path (test_language.LanguageTests) ... ok
+test_rejects_empty_or_explicit_negative_without_generation (test_language.LanguageTests) ... ok
+test_rejects_invalid_contract_and_out_of_range_parameters (test_language.LanguageTests) ... ok
+test_rejects_missing_or_unexpected_weights (test_language.LanguageTests) ... ok
+test_requires_bound_nonempty_training_prompt (test_language.LanguageTests) ... ok
+test_to_end_direction_is_validated_then_removed (test_language.LanguageTests) ... ok
+test_uses_raw_json_rather_than_permissive_worker_parse (test_language.LanguageTests) ... ok
+test_all_commands_leave_a_half_duplex_reply_interval (test_motors.MotorTests) ... ok
+test_busy_serial_is_refused (test_motors.MotorTests) ... ok
+test_explicit_halt_interrupts_stream (test_motors.MotorTests) ... ok
+test_fragmented_noisy_feedback (test_motors.MotorTests) ... ok
+test_halt_during_reply_interval_cancels_next_target (test_motors.MotorTests) ... ok
+test_kernel_exclusive_open (test_motors.MotorTests) ... ok
+test_mapping_and_config_validation (test_motors.MotorTests) ... ok
+test_mid_motion_feedback_loss_halts_both (test_motors.MotorTests) ... ok
+test_missing_speed_reports_motor_and_feedback_type (test_motors.MotorTests) ... ok
+test_only_supported_commands_are_sent (test_motors.MotorTests) ... ok
+test_open_has_no_commands_and_raw_8n1 (test_motors.MotorTests) ... ok
+test_read_state_retries_a_lost_query_without_motion (test_motors.MotorTests) ... ok
+test_stale_feedback_stops_both_before_raising (test_motors.MotorTests) ... ok
+test_start_mismatch_never_repositions_implicitly (test_motors.MotorTests) ... ok
+test_stop_needs_feedback_not_just_write_success (test_motors.MotorTests) ... ok
+test_streams_without_stopping_at_each_point (test_motors.MotorTests) ... ok
+test_stuck_axis_stops_the_pair (test_motors.MotorTests) ... ok
+test_validation_before_any_serial_io (test_motors.MotorTests) ... ok
+test_video_health_failure_stops_both_without_more_targets (test_motors.MotorTests) ... ok
+test_approach_and_partial_withdraw_keep_measured_first_angles (test_planner.PlannerTests) ... ok
+test_bad_contact_start_does_not_jump_to_ideal_pose (test_planner.PlannerTests) ... ok
+test_contact_exemption_identifies_only_selected_face_and_pin (test_planner.PlannerTests) ... ok
+test_free_line_preserves_actual_start_and_new_face_reference (test_planner.PlannerTests) ... ok
+test_free_rejects_collision_without_searching (test_planner.PlannerTests) ... ok
+test_free_uses_only_finite_passage_recipe_after_direct_failure (test_planner.PlannerTests) ... ok
+test_planner_has_no_search_grid_or_model_asset_dependency (test_planner.PlannerTests) ... ok
+test_precontact_offset_is_world_x_not_rotating_normal (test_planner.PlannerTests) ... ok
+test_push_fixed_point_straight_line_without_wall_rejection (test_planner.PlannerTests) ... ok
+test_push_rejects_limit_and_unreachable_targets (test_planner.PlannerTests) ... ok
+test_push_small_actual_start_error_is_continuous (test_planner.PlannerTests) ... ok
+test_angle_range_and_wrong_reply (test_protocol.ProtocolTests) ... ok
+test_bad_header_length_does_not_hide_good_reply (test_protocol.ProtocolTests) ... ok
+test_bad_payload_checksum_is_skipped (test_protocol.ProtocolTests) ... ok
+test_command_validation (test_protocol.ProtocolTests) ... ok
+test_existing_wire_layout (test_protocol.ProtocolTests) ... ok
+test_fragmented_and_multiple_frames (test_protocol.ProtocolTests) ... ok
+test_signed_state_fields (test_protocol.ProtocolTests) ... ok
+test_absolute_data_paths_are_preserved (test_runtime.ConfigPathTests) ... ok
+test_conflicting_input_output_is_rejected (test_runtime.ConfigPathTests) ... ok
+test_data_file_cannot_be_parent_of_another_data_path (test_runtime.ConfigPathTests) ... ok
+test_relative_paths_follow_project_root (test_runtime.ConfigPathTests) ... ok
+test_resource_paths_cannot_be_overwritten (test_runtime.ConfigPathTests) ... ok
+test_result_cannot_use_reserved_processing_filename (test_runtime.ConfigPathTests) ... ok
+test_bad_text_does_not_open_motor (test_runtime.RuntimeTests) ... [task 49c3d5fd0339404cb38bb6d7cdc27504] received
+[task 49c3d5fd0339404cb38bb6d7cdc27504] failed: empty_task_text; result: /tmp/runtime 中文 2rlrtz7t/结果/result.json
+[task 763c97cc717f4403b460a0210e405e53] received
+[task 763c97cc717f4403b460a0210e405e53] failed: empty_task_text; result: /tmp/runtime 中文 2rlrtz7t/结果/result.json
+[task b862736953dc4db9963968ce5779575f] received
+[task b862736953dc4db9963968ce5779575f] failed: task_text_exceeds_8192_bytes; result: /tmp/runtime 中文 2rlrtz7t/结果/result.json
+ok
+test_camera_failure_is_visible_and_task_is_consumed_once (test_runtime.RuntimeTests) ... ok
+test_delete_failure_does_not_erase_saved_success_on_restart (test_runtime.RuntimeTests) ... [task 77cf1a4fc66d4361ac0fe22c6003b739] received
+[task 77cf1a4fc66d4361ac0fe22c6003b739] parsed: {'intent': 'push_to_end', 'color': '橙'}
+ok
+test_failed_task_is_saved_and_deleted (test_runtime.RuntimeTests) ... [task d1eb0e4544754501a9227b99b609f908] received
+[task d1eb0e4544754501a9227b99b609f908] parsed: {'intent': 'push_to_end', 'color': '橙'}
+[task d1eb0e4544754501a9227b99b609f908] failed: three_retries_exhausted; result: /tmp/runtime 中文 y7ki2ui3/结果/result.json
+ok
+test_identical_text_is_a_new_task_and_not_confused_with_old_result (test_runtime.RuntimeTests) ... [task 5cc2259811f140ad985259a01328de11] received
+[task 5cc2259811f140ad985259a01328de11] parsed: {'intent': 'push_to_end', 'color': '橙'}
+[task 5cc2259811f140ad985259a01328de11] completed: done; result: /tmp/runtime 中文 iji4x2k2/结果/result.json
+ok
+test_idle_poll_does_not_run_model_or_motor (test_runtime.RuntimeTests) ... ok
+test_inference_error_is_consumed_without_motion (test_runtime.RuntimeTests) ... [task e31216053a9a45e49c46ff8d36dbbf16] received
+[task e31216053a9a45e49c46ff8d36dbbf16] failed: unknown_intent; result: /tmp/runtime 中文 b0wzt1po/结果/result.json
+ok
+test_new_upload_during_execution_survives_current_cleanup (test_runtime.RuntimeTests) ... [task cc2ed7b802764f9db5b76ac044d3b551] received
+[task cc2ed7b802764f9db5b76ac044d3b551] parsed: {'intent': 'push_to_end', 'color': '橙'}
+[task cc2ed7b802764f9db5b76ac044d3b551] completed: done; result: /tmp/runtime 中文 li8qv5xg/结果/result.json
+[task 992cd68f38824480acaba9bd7c98c513] received
+[task 992cd68f38824480acaba9bd7c98c513] parsed: {'intent': 'push_to_end', 'color': '橙'}
+[task 992cd68f38824480acaba9bd7c98c513] completed: done; result: /tmp/runtime 中文 li8qv5xg/结果/result.json
+ok
+test_restart_after_claim_records_interruption_without_replay (test_runtime.RuntimeTests) ... ok
+test_restart_after_saved_result_preserves_success (test_runtime.RuntimeTests) ... ok
+test_result_save_failure_keeps_claim_and_stops_loop (test_runtime.RuntimeTests) ... [task 98c417c6a9b84d8891c1003b92bf153a] received
+[task 98c417c6a9b84d8891c1003b92bf153a] parsed: {'intent': 'push_to_end', 'color': '橙'}
+ok
+test_result_saved_before_delete_and_next_poll_does_not_repeat (test_runtime.RuntimeTests) ... [task f3c5116335184070837a6453baf8ae13] received
+[task f3c5116335184070837a6453baf8ae13] parsed: {'intent': 'push_to_end', 'color': '橙'}
+[task f3c5116335184070837a6453baf8ae13] completed: done; result: /tmp/runtime 中文 zm2x5pso/结果/result.json
+ok
+test_shutdown_during_inference_finishes_file_without_motion (test_runtime.RuntimeTests) ... [task aab48a542477404ea45d90b3d22bee52] received
+[task aab48a542477404ea45d90b3d22bee52] failed: runtime_stopped_during_task; result: /tmp/runtime 中文 uiusep3d/结果/result.json
+ok
+test_single_runtime_lock (test_runtime.RuntimeTests) ... ok
+test_stop_does_not_claim_next_waiting_upload (test_runtime.RuntimeTests) ... [task 626b8c03a61d410ab698bd3a443e3bf8] received
+[task 626b8c03a61d410ab698bd3a443e3bf8] parsed: {'intent': 'push_to_end', 'color': '橙'}
+[task 626b8c03a61d410ab698bd3a443e3bf8] failed: task_interrupted; result: /tmp/runtime 中文 chsc7nsq/结果/result.json
+ok
+test_filling_the_gripper_opening_is_rejected (test_scene.SceneTests) ... ok
+test_home_is_clear_and_limits_are_enforced (test_scene.SceneTests) ... ok
+test_long_silver_mount_is_an_obstacle (test_scene.SceneTests) ... ok
+test_mass_fits_between_projecting_upper_lower_plates (test_scene.SceneTests) ... ok
+test_material_point_outside_allowed_face_is_rejected (test_scene.SceneTests) ... ok
+test_moving_material_point_keeps_same_physical_envelope (test_scene.SceneTests) ... ok
+test_only_target_stem_gets_contact_rounding_tolerance (test_scene.SceneTests) ... ok
+test_camera_start_failure_never_opens_motors (test_startup.StartupTests) ... Runtime ready: /tmp/startup 中文 g8gudef8/input/task.txt
+[task 578d85b49f3c412081538b26b55a5c82] received
+[task 578d85b49f3c412081538b26b55a5c82] parsed: {'intent': 'push_to_end', 'color': '橙'}
+[task 578d85b49f3c412081538b26b55a5c82] camera starting
+[task 578d85b49f3c412081538b26b55a5c82] failed: camera_unavailable; result: /tmp/startup 中文 g8gudef8/output/result.json
+ok
+test_cli_task_arguments_are_not_an_execution_entry (test_startup.StartupTests) ... ok
+test_missing_video_is_reported_even_if_arm_task_completed (test_startup.StartupTests) ... Runtime ready: /tmp/startup 中文 _5pres8k/input/task.txt
+[task 836301d8c42140f89efb03e236a40b51] received
+[task 836301d8c42140f89efb03e236a40b51] parsed: {'intent': 'push_to_end', 'color': '橙'}
+[task 836301d8c42140f89efb03e236a40b51] camera starting
+[task 836301d8c42140f89efb03e236a40b51] camera ready; executing
+[task 836301d8c42140f89efb03e236a40b51] failed: video_recording_failed; result: /tmp/startup 中文 _5pres8k/output/result.json
+ok
+test_model_initialization_failure_leaves_txt_unclaimed (test_startup.StartupTests) ... ok
+test_motor_context_exits_before_video_is_finalized (test_startup.StartupTests) ... Runtime ready: /tmp/startup 中文 _3ibu6ww/input/task.txt
+[task 2eb65ac1a7fe441bbb353c28d6aaf859] received
+[task 2eb65ac1a7fe441bbb353c28d6aaf859] parsed: {'intent': 'push_to_end', 'color': '橙'}
+[task 2eb65ac1a7fe441bbb353c28d6aaf859] camera starting
+[task 2eb65ac1a7fe441bbb353c28d6aaf859] camera ready; executing
+[task 2eb65ac1a7fe441bbb353c28d6aaf859] failed: motion_failed; result: /tmp/startup 中文 _3ibu6ww/output/result.json
+ok
+test_one_resident_model_serves_two_file_tasks (test_startup.StartupTests) ... Runtime ready: /tmp/startup 中文 u6mtqlg8/input/task.txt
+[task 776ed497482e4db2b9bd8af5b9f48d5f] received
+[task 776ed497482e4db2b9bd8af5b9f48d5f] parsed: {'intent': 'push_to_end', 'color': '橙'}
+[task 776ed497482e4db2b9bd8af5b9f48d5f] camera starting
+[task 776ed497482e4db2b9bd8af5b9f48d5f] camera ready; executing
+[task 776ed497482e4db2b9bd8af5b9f48d5f] completed: done; result: /tmp/startup 中文 u6mtqlg8/output/result.json
+[task fcf842edbae54e618caca29dd9ddf7de] received
+[task fcf842edbae54e618caca29dd9ddf7de] parsed: {'intent': 'push_to_end', 'color': '橙'}
+[task fcf842edbae54e618caca29dd9ddf7de] camera starting
+[task fcf842edbae54e618caca29dd9ddf7de] camera ready; executing
+[task fcf842edbae54e618caca29dd9ddf7de] completed: done; result: /tmp/startup 中文 u6mtqlg8/output/result.json
+ok
+test_clipping_preserves_task_semantics (test_tasks.TaskTests) ... ok
+test_config_rejects_excessive_retries (test_tasks.TaskTests) ... ok
+test_distance_retry_retains_absolute_goal (test_tasks.TaskTests) ... ok
+test_endpoint_resolver_uses_configured_end_for_each_color (test_tasks.TaskTests) ... ok
+test_environment_snapshot_waits_for_a_frame_after_the_call (test_tasks.TaskTests) ... ok
+test_initial_unconfirmed_stop_never_starts_motion (test_tasks.TaskTests) ... ok
+test_interrupt_stops_without_retry (test_tasks.TaskTests) ... ok
+test_lost_vision_does_not_start_another_push (test_tasks.TaskTests) ... ok
+test_no_motion_still_requires_multiple_fresh_images (test_tasks.TaskTests) ... ok
+test_outside_start_preserves_measurement_and_does_not_move (test_tasks.TaskTests) ... ok
+test_round_trip_at_designated_end_goes_to_other_end (test_tasks.TaskTests) ... ok
+test_round_trip_returns_to_initial_middle (test_tasks.TaskTests) ... ok
+test_slider_success_after_joint_stall_is_observed (test_tasks.TaskTests) ... ok
+test_to_end_ignores_language_direction (test_tasks.TaskTests) ... ok
+test_unconfirmed_stop_prevents_more_motion (test_tasks.TaskTests) ... ok
+test_verification_requires_new_observations (test_tasks.TaskTests) ... ok
+test_video_failure_stops_before_another_move (test_tasks.TaskTests) ... ok
+test_block_fallback_is_not_nominal_calibration (test_vision.VisionTests) ... ok
+test_camera_start_failure_still_closes_and_second_close_is_safe (test_vision.VisionTests) ... ok
+test_capture_failure_is_propagated (test_vision.VisionTests) ... ok
+test_existing_converter_rejects_degenerate_ray (test_vision.VisionTests) ... ok
+test_frame_detector_rejects_wrong_type_shape_or_aspect (test_vision.VisionTests) ... ok
+test_future_boundary_is_rejected_without_reading_camera (test_vision.VisionTests) ... ok
+test_global_to_model_nominal_is_accepted (test_vision.VisionTests) ... ok
+test_health_check_only_checks_capture_health (test_vision.VisionTests) ... ok
+test_invalid_rail_correction_is_rejected_before_camera_start (test_vision.VisionTests) ... ok
+test_missing_color_is_rejected (test_vision.VisionTests) ... ok
+test_nonfinite_coordinates_are_rejected (test_vision.VisionTests) ... ok
+test_read_uses_memory_detector_and_nominal_world_conversion (test_vision.VisionTests) ... ok
+test_recorded_endpoint_correction_is_shared_by_both_colors (test_vision.VisionTests) ... ok
+test_same_stream_reads_new_sequences_and_freshness_boundary (test_vision.VisionTests) ... ok
+test_stale_after_detection_is_rejected_and_frame_is_consumed (test_vision.VisionTests) ... ok
+test_start_is_explicit_and_initialization_opens_no_camera (test_vision.VisionTests) ... ok
+test_unknown_coordinates_are_rejected (test_vision.VisionTests) ... ok
+test_video_path_is_configurable_and_task_name_cannot_escape_it (test_vision.VisionTests) ... ok
+test_wrong_origin_y_is_rejected (test_vision.VisionTests) ... ok
+
+----------------------------------------------------------------------
+Ran 127 tests in 3.922s
+
+OK

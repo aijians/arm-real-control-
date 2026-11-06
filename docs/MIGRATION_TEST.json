@@ -1,0 +1,11 @@
+{
+  "scope": "Relocated board production tree with spaces/Chinese/percent/dollar signs. Planner and mock file task only; no model inference, camera or UART.",
+  "returncode": 0,
+  "stdout": "[task 473429fba45c441db20162a4f7887b60] received\n[task 473429fba45c441db20162a4f7887b60] parsed: {'intent': 'push_to_end', 'color': '橙'}\n[task 473429fba45c441db20162a4f7887b60] completed: done; result: /tmp/arm 中文 迁移 % ${PATH} 32q648it/arm_real_control/output/result.json\n{\"portable\": true, \"no_model_assets_needed\": true, \"task_consumed_once\": true, \"interrupted_task_not_replayed\": true}\n",
+  "stderr": "",
+  "passed": true,
+  "portable": true,
+  "no_model_assets_needed": true,
+  "task_consumed_once": true,
+  "interrupted_task_not_replayed": true
+}

@@ -1,0 +1,235 @@
+{
+  "planning": {
+    "free_speed_deg_s": 10.0,
+    "push_speed_mm_s": 5.0,
+    "contact_speed_mm_s": 2.0,
+    "linear_step_mm": 1.0,
+    "contact_position_tolerance_mm": 1.0,
+    "free_speed_mm_s": 20.0,
+    "collision_step_deg": 0.25,
+    "waypoint_min_step_deg": 1.2,
+    "return_q_deg": [
+      170.0,
+      4.0
+    ],
+    "waypoint_min_axis_step_deg": 0.1
+  },
+  "sliders": {
+    "橙": {
+      "y_mm": 155.0,
+      "end": "left"
+    },
+    "蓝": {
+      "y_mm": 155.0,
+      "end": "right"
+    }
+  },
+  "hardware": {
+    "baudrate": 115200,
+    "motors": [
+      {
+        "name": "upper",
+        "device": "/dev/ttyS1",
+        "id": 1,
+        "sign": 1,
+        "ratio": 1.0,
+        "offset_deg": -1.75,
+        "limits_deg": [
+          0.0,
+          180.48170546620932
+        ]
+      },
+      {
+        "name": "lower",
+        "device": "/dev/ttyS4",
+        "id": 2,
+        "sign": 1,
+        "ratio": 1.0,
+        "offset_deg": 2.29,
+        "limits_deg": [
+          0.0,
+          93.82019051412821
+        ]
+      }
+    ],
+    "command_rate_hz": 50.0,
+    "feedback_rate_hz": 20.0,
+    "max_speed_deg_s": 18.0,
+    "feedback_timeout_s": 0.5,
+    "move_timeout_margin_s": 5.0,
+    "angle_tolerance_deg": 0.3,
+    "still_speed_deg_s": 1.0,
+    "stable_s": 0.3,
+    "no_progress_s": 2.0,
+    "progress_deg": 0.05,
+    "waypoint_tolerance_ratio": 0.5,
+    "inactive_feedback_hz": 2.0,
+    "inactive_feedback_timeout_s": 1.5,
+    "inactive_drift_deg": 1.0,
+    "coalesce_step_deg": 0.45,
+    "coalesce_wait_s": 0.45,
+    "settling_bias_wait_s": 0.45,
+    "settling_bias_max_deg": 0.6,
+    "settling_bias_step_deg": 0.2,
+    "settling_bias_trigger_margin_deg": 0.01,
+    "min_speed_deg_s": 2.0,
+    "speed_feedforward_gain": 1.15,
+    "speed_error_gain_s": 2.5,
+    "goal_hold_s": 3.0,
+    "goal_settle_timeout_s": 5.0,
+    "tracking_lead_deg": 1.8,
+    "tracking_abort_deg": 3.5,
+    "speed_recovery": {
+      "enabled": true,
+      "axes": [
+        "upper"
+      ],
+      "phases": [
+        "free"
+      ],
+      "directions": [
+        -1
+      ],
+      "speed_steps_deg_s": [
+        18.0,
+        30.0,
+        45.0,
+        60.0
+      ],
+      "trigger_s": 2.0,
+      "observe_s": 2.0,
+      "total_recovery_s": 24.0,
+      "max_upshifts": 4,
+      "max_no_gain_windows": 2,
+      "settling_enabled": true,
+      "settling_speed_deg_s": 18.0,
+      "settling_safe_distance_deg": 0.1,
+      "oscillation_window_s": 1.2,
+      "oscillation_amplitude_deg": 0.12,
+      "oscillation_reversal_deg": 0.04,
+      "oscillation_reversals": 3,
+      "near_goal_limit_deg": 1.0
+    },
+    "motion_recovery": {
+      "enabled": true,
+      "max_downshifts": 2,
+      "max_angle_changes": 3,
+      "angle_step_deg": 0.2,
+      "angle_max_deg": 0.6,
+      "downshift_steps_deg_s": [
+        2.0,
+        6.0,
+        18.0,
+        30.0
+      ]
+    }
+  },
+  "verification": {
+    "tolerance_mm": 0.5,
+    "samples": 3,
+    "interval_s": 0.2
+  },
+  "retry_limit": 3,
+  "vision": {
+    "profile": "ground",
+    "shoulder_global_xy_mm": [
+      189.3,
+      28.5
+    ],
+    "rail_model_y_mm": 155.0,
+    "rail_y_tolerance_mm": 0.01,
+    "calibration": null,
+    "rail_z_mm": null,
+    "capture_timeout_s": 20.0,
+    "max_frame_age_s": 3.0,
+    "camera_device": "/dev/video31",
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "warmup_seconds": 2.0,
+    "warmup_frames": 30,
+    "eos_timeout_s": 8.0,
+    "bitrate": 8000000,
+    "rail_geometry": {
+      "center_inset_mm": 9.0,
+      "occupied_end_clearance_mm": 15.5
+    }
+  },
+  "paths": {
+    "task_file": "input/task.txt",
+    "result_file": "output/result.json",
+    "runtime_dir": "runtime",
+    "model_package": "hermes_model",
+    "python": "/usr/bin/python3",
+    "scene": "config/scene.json",
+    "video_dir": "videos"
+  },
+  "poll_interval_s": 1.0,
+  "kinematics": {
+    "arm": {
+      "shoulder_static_yaw_rad": -3.0642931926,
+      "elbow_translation_mm": [
+        -139.58,
+        10.81
+      ],
+      "elbow_static_yaw_rad": -0.6243015991198888,
+      "joint_limits_rad": [
+        [
+          0.0,
+          3.15
+        ],
+        [
+          0.0,
+          1.6374712293198888
+        ]
+      ]
+    },
+    "faces": {
+      "+x": {
+        "point_canonical_xy_mm": [
+          134.24,
+          36.58
+        ],
+        "normal_canonical_xy": [
+          0.637538636371788,
+          -0.7704183844724899
+        ],
+        "approach_offset_mm": 5.0,
+        "contact_segment_canonical_xy_mm": [
+          [
+            107.63,
+            14.56
+          ],
+          [
+            138.31,
+            39.94
+          ]
+        ]
+      },
+      "-x": {
+        "point_canonical_xy_mm": [
+          135.94,
+          40.58
+        ],
+        "normal_canonical_xy": [
+          -0.6375386488821947,
+          0.7704183741198453
+        ],
+        "approach_offset_mm": 2.0,
+        "contact_segment_canonical_xy_mm": [
+          [
+            137.02,
+            41.47
+          ],
+          [
+            104.77,
+            14.79
+          ]
+        ]
+      }
+    },
+    "slider": {
+      "stem_radius_mm": 4.0
+    }
+  }
+}

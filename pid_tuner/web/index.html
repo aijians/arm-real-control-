@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>大臂 PID 调参台</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="大臂 PID 调参台"><span class="brand-mark" aria-hidden="true">∿</span><span>ARM <b>CONTROL</b><small>RS485 · PARAMETER WORKBENCH</small></span></a>
+    <div class="topbar-right"><span class="station-tag">大臂 · 单电机调试</span><span id="mode-badge" class="badge muted">等待服务</span><span class="connection-pill"><i id="connection-dot"></i><span id="connection-label">未连接</span></span></div>
+  </header>
+  <main>
+    <section class="page-heading">
+      <div><p class="eyebrow">MOTOR TUNING / 调参工作台</p><h1>大臂 PID 参数调节</h1><p class="page-description">读取、调整、验证。每一次修改都有据可查。</p></div>
+      <div class="heading-actions"><div class="export-session"><button id="export-json" class="button ghost" title="下载参数、反馈、事件记录与失败诊断">↓ 会话 JSON</button><span class="subtle">包含失败诊断</span></div><button id="export-csv" class="button ghost">↓ 反馈 CSV</button></div>
+    </section>
+    <div id="mode-notice" class="notice demo-notice" role="status"><span class="notice-icon">i</span><div><strong id="mode-notice-title">正在连接调参服务</strong><span id="mode-notice-text">程序在开发板运行，浏览器显示电机参数与实时反馈。</span></div><span id="session-label" class="session-label">SESSION —</span></div>
+    <div id="message" class="message" role="alert" hidden><span id="message-text"></span><button id="dismiss-message" aria-label="关闭提示">×</button></div>
+    <div id="safety-interlock" class="message safety-interlock" role="alert" hidden><strong>停止尚未确认 · 操作已锁定</strong><span>请立即点击“停止电机”并检查实际运动；写参数、保存、恢复、使能和试转暂不可用。</span></div>
+
+    <section class="connection-card card" aria-label="连接控制">
+      <div class="device-detail"><span class="device-icon" aria-hidden="true">⇄</span><div><span class="label">RS485 设备</span><strong id="device-value">—</strong></div></div>
+      <div class="connection-data"><span class="label">电机地址</span><strong id="motor-id">—</strong></div>
+      <div class="connection-data"><span class="label">波特率</span><strong id="baudrate">—</strong></div>
+      <div class="connection-data"><span class="label">反馈状态</span><strong id="feedback-status">等待数据</strong></div>
+      <div class="connection-actions"><button id="connect" class="button primary">连接电机</button><button id="disconnect" class="button secondary" disabled>断开</button><button id="read" class="button secondary" disabled><span aria-hidden="true">↻</span> 读取参数</button><button id="diagnose" class="button secondary" title="独立读取通信与参数应答，不写参数、不使能、不发送运动指令" disabled>只读诊断</button></div>
+    </section>
+
+    <details id="diagnostics-panel" class="card diagnostics-panel">
+      <summary>连接诊断（只读）<span id="diagnostics-status" class="badge muted">尚未诊断</span></summary>
+      <div class="diagnostics-content" aria-live="polite">
+        <p class="diagnostics-note">逐项读取电机应答，不写参数、不使能、不发送运动指令。连接失败时也会自动保存诊断，可下载会话 JSON 查看。</p>
+        <p id="diagnostics-empty" class="subtle">暂无诊断结果。可在未连接时点击“只读诊断”。</p>
+        <p id="diagnostics-meta" class="subtle" hidden></p>
+        <ul id="diagnostics-summary" class="diagnostics-summary" hidden></ul>
+        <div id="diagnostics-steps" class="diagnostics-steps"></div>
+      </div>
+    </details>
+
+    <div id="parameter-interlock" class="message safety-interlock" role="alert" hidden><strong>参数写入未确认</strong><span>暂禁保存、使能和试转。写入可能已生效，也可能失败；请先核对应答与操作记录，不要反复重写或用重连消除提示。</span></div>
+    <section class="metrics" aria-label="电机实时状态">
+      <article class="metric"><span class="label">当前位置</span><div><strong id="angle-value">—</strong><span class="unit">°</span></div><span id="target-caption" class="metric-caption">目标 — °</span></article>
+      <article class="metric"><span class="label">反馈速度</span><div><strong id="speed-value">—</strong><span class="unit">°/s</span></div><span class="metric-caption">机械角速度</span></article>
+      <article class="metric"><span class="label">母线电流</span><div><strong id="current-value">—</strong><span class="unit">A</span></div><span class="metric-caption">总线反馈值</span></article>
+      <article class="metric health-metric"><div class="health-line"><span class="label">电压</span><strong><span id="voltage-value">—</span><small> V</small></strong><span class="label">温度</span><strong><span id="temperature-value">—</span><small> °C</small></strong></div><div id="fault-state" class="fault-state neutral"><span class="status-dot"></span><span id="fault-text">等待故障状态</span></div><span id="motor-state" class="metric-caption">电机状态 —</span></article>
+    </section>
+
+    <div class="workspace">
+      <div class="control-column">
+        <section class="card tuning-card">
+          <div class="card-heading"><div><p class="eyebrow">PARAMETERS</p><h2>PID 参数</h2></div><span class="subtle">16 位整数 · 0–65535</span></div>
+          <div class="workflow"><span><b>1</b> 读取备份</span><i>→</i><span><b>2</b> 写入 RAM</span><i>→</i><span><b>3</b> 试转验证</span><i>→</i><span><b>4</b> 保存 ROM</span></div>
+          <article class="loop-section" data-loop="angle">
+            <div class="loop-heading"><div><span class="loop-number">01</span><h3>角度环 <small>POSITION</small></h3></div><span id="angle-status" class="badge muted">未读取</span></div>
+            <div class="pid-grid">
+              <label><span>Kp <small>比例</small></span><input id="angle-kp" type="number" min="0" max="65535" step="1" inputmode="numeric" disabled><span class="readback"><small data-readback-loop="angle">整组读回</small> <b id="angle-kp-read">—</b><span>备份 <b id="angle-kp-backup">—</b></span></span></label>
+              <label><span>Ki <small>积分</small></span><input id="angle-ki" type="number" min="0" max="65535" step="1" inputmode="numeric" disabled><span class="readback"><small data-readback-loop="angle">整组读回</small> <b id="angle-ki-read">—</b><span>备份 <b id="angle-ki-backup">—</b></span></span></label>
+              <label><span>Kd <small>微分</small></span><input id="angle-kd" type="number" min="0" max="65535" step="1" inputmode="numeric" disabled><span class="readback"><small data-readback-loop="angle">整组读回</small> <b id="angle-kd-read">—</b><span>备份 <b id="angle-kd-backup">—</b></span></span></label>
+            </div>
+            <p id="angle-write-summary" class="subtle" hidden></p><p id="angle-write-error" class="subtle" hidden></p><details id="angle-write-details" class="diagnostics-step" hidden><summary>最近一次 RAM 写入详情</summary><pre id="angle-write-evidence"></pre></details><div class="loop-footer"><span id="angle-draft" class="draft-state">读取后可编辑</span><div><button class="button compact ghost restore" data-loop="angle" disabled>恢复备份</button><button class="button compact secondary save" data-loop="angle" disabled>保存 ROM</button><button class="button compact primary write" data-loop="angle" disabled>写入 RAM</button></div></div>
+          </article>
+          <article class="loop-section" data-loop="speed">
+            <div class="loop-heading"><div><span class="loop-number">02</span><h3>速度环 <small>SPEED</small></h3></div><span id="speed-status" class="badge muted">未读取</span></div>
+            <div class="pid-grid">
+              <label><span>Kp <small>比例</small></span><input id="speed-kp" type="number" min="0" max="65535" step="1" inputmode="numeric" disabled><span class="readback"><small data-readback-loop="speed">整组读回</small> <b id="speed-kp-read">—</b><span>备份 <b id="speed-kp-backup">—</b></span></span></label>
+              <label><span>Ki <small>积分</small></span><input id="speed-ki" type="number" min="0" max="65535" step="1" inputmode="numeric" disabled><span class="readback"><small data-readback-loop="speed">整组读回</small> <b id="speed-ki-read">—</b><span>备份 <b id="speed-ki-backup">—</b></span></span></label>
+              <label><span>Kd <small>微分</small></span><input id="speed-kd" type="number" min="0" max="65535" step="1" inputmode="numeric" disabled><span class="readback"><small data-readback-loop="speed">整组读回</small> <b id="speed-kd-read">—</b><span>备份 <b id="speed-kd-backup">—</b></span></span></label>
+            </div>
+            <p id="speed-write-summary" class="subtle" hidden></p><p id="speed-write-error" class="subtle" hidden></p><details id="speed-write-details" class="diagnostics-step" hidden><summary>最近一次 RAM 写入详情</summary><pre id="speed-write-evidence"></pre></details><div class="loop-footer"><span id="speed-draft" class="draft-state">读取后可编辑</span><div><button class="button compact ghost restore" data-loop="speed" disabled>恢复备份</button><button class="button compact secondary save" data-loop="speed" disabled>保存 ROM</button><button class="button compact primary write" data-loop="speed" disabled>写入 RAM</button></div></div>
+          </article>
+          <details class="reference-panel"><summary>调参参考 <span>仅填入表单，不会下发</span></summary><p>大臂实测起点：角度 50/0/0，速度 300/10/0。先保持角度环与速度 Ki=10 不变，逐次比较速度 Kp=350 / 400 / 450。每次只改一个量，出现抖动立即停止并退回。</p><div class="reference-actions"><button class="button compact secondary preset" data-kp="350">参考 A · Kp 350</button><button class="button compact secondary preset" data-kp="400">参考 B · Kp 400</button><button class="button compact secondary preset" data-kp="450">参考 C · Kp 450</button></div><p class="subtle">保留当前 Kd。先读回参数并备份；PID 不能单独证明输出扭矩不足。</p></details>
+          <details class="readonly-panel"><summary>其他驱动参数 <span>只读</span></summary><div class="readonly-grid"><div><span class="label">电流环 PID</span><strong id="current-pid">—</strong></div><div><span class="label">MS 输出限制 raw</span><strong id="torque-limit">—</strong></div><div><span class="label">MS 输出反馈 raw</span><strong id="iq-raw">—</strong></div></div><p class="subtle">本机 MS4005 的输出为功率控制原始量，不是扭矩电流；限制实测 850，不换算为 A、W 或 N·m，也不在本界面提高限制。</p><pre id="raw-values">等待读取原始参数</pre></details>
+        </section>
+
+        <section class="card motion-card">
+          <div class="card-heading"><div><p class="eyebrow">SINGLE MOVE</p><h2>单次小幅试转</h2></div><span id="motion-status" class="badge muted">待机</span></div>
+          <p class="motion-hint">先支撑大臂、清空行程。到位后连续验证 3 秒，通过后持续保持原目标，可直接输入下一角度。每个新目标重新验证，不发送返回起点指令。</p><p id="ram-ack-notice" class="motion-hint" hidden>RAM 写入已收到成功应答，运行参数未独立读回。试转需人工触发；先用当前位置附近 2° 小幅验证，观察抖动、温升与输出后再决定是否保存。</p>
+          <div class="motion-inputs"><label>目标位置 <span>° · 绝对角度</span><div class="input-unit"><input id="move-target" type="number" step="0.1" inputmode="decimal" placeholder="先读取位置" disabled><button id="use-current" title="填入当前反馈角度" disabled>取当前位置</button></div></label><label>试转速度 <span>°/s</span><input id="move-speed" type="number" min="0.1" max="60" step="0.1" value="18" inputmode="decimal" disabled></label></div>
+          <div class="motion-boundary" id="motion-limits">单次位移 ≤ 10° · 速度 ≤ 60°/s</div>
+          <div class="motion-actions"><button id="enable" class="button secondary" disabled>使能电机</button><button id="move" class="button primary" disabled>▶ 试转并保持观察</button><button id="stop" class="button stop" disabled><span aria-hidden="true">■</span> 停止电机</button></div>
+          <div id="trial-panel" class="trial-panel" aria-live="polite">
+            <div class="trial-heading"><strong>本次试验结果</strong><span id="trial-outcome" class="badge muted">尚未试验</span></div>
+            <p id="trial-description">点击试转后分别记录“到位保持验证”与“停止输出”，停止后保留试验结果。</p>
+            <div class="trial-values"><div><span>起始位置</span><strong id="trial-start">—</strong></div><div><span>试验目标</span><strong id="trial-target">—</strong></div><div><span id="trial-error-label">最后试验误差</span><strong id="trial-error">—</strong></div><div><span>保持峰值误差</span><strong id="trial-peak-error">—</strong></div><div><span id="trial-speed-label">最后试验速度</span><strong id="trial-speed">—</strong></div><div><span>保持峰值速度</span><strong id="trial-peak-speed">—</strong></div></div>
+            <p id="hold-warning" class="trial-stop-reason" hidden></p>
+            <p id="hold-guard-policy" class="subtle">短暂波动先观察；持续异常或明显偏离时停止。</p>
+            <div id="hold-progress" class="hold-progress" hidden><div><span id="hold-progress-label">连续稳定验证</span><strong id="hold-stable">0.0 / 3.0 s</strong></div><progress id="hold-stable-progress" max="3" value="0" aria-label="连续稳定保持验证进度"></progress><p id="hold-countdown">保持剩余 —</p></div>
+            <p id="trial-stop-reason" class="trial-stop-reason" hidden></p>
+            <p id="previous-trial" class="previous-trial" hidden></p>
+          </div>
+          <p class="stop-note">成功后的保持不设 30 秒期限，请留在页面观察。验证阶段最多 30 秒；心跳中断 3 秒、故障或保持失败时仍自动尝试停止。停止后保持输出可能解除，机械臂可能受重力或弹性回位；先支撑再停止。网页停止依赖通信，保持物理急停可用。</p>
+        </section>
+      </div>
+
+      <div class="monitor-column">
+        <section class="card monitor-card">
+          <div class="card-heading"><div><p class="eyebrow">LIVE TELEMETRY</p><h2>实时反馈</h2></div><div class="live-indicator"><span id="live-dot"></span><span id="live-label">等待采样</span></div></div>
+          <div class="chart-toolbar"><span>时间窗口 <strong>30 s</strong></span><button id="clear-charts" class="text-button">清空曲线</button></div>
+          <div class="chart-block"><div class="chart-heading"><h3>角度 <span>°</span></h3><div class="legend"><span><i class="line-key target-key"></i>目标</span><span><i class="line-key angle-key"></i>反馈</span></div></div><div class="chart-wrap"><canvas id="angle-chart" aria-label="最近30秒目标角度和反馈角度曲线" role="img"></canvas><span class="chart-empty" id="angle-empty">连接电机后显示反馈</span></div></div>
+          <div class="chart-block"><div class="chart-heading"><h3>速度 <span>°/s</span></h3><span class="chart-last" id="speed-last">—</span></div><div class="chart-wrap"><canvas id="speed-chart" aria-label="最近30秒反馈速度曲线" role="img"></canvas><span class="chart-empty" id="speed-empty">等待采样</span></div></div>
+          <div class="chart-block"><div class="chart-heading"><h3>母线电流 <span>A</span></h3><span class="chart-last" id="current-last">—</span></div><div class="chart-wrap"><canvas id="current-chart" aria-label="最近30秒母线电流曲线" role="img"></canvas><span class="chart-empty" id="current-empty">等待采样</span></div></div>
+          <div class="chart-block"><div class="chart-heading"><h3>MS 输出反馈 <span>raw · 对照限制 850</span></h3></div><div class="chart-wrap"><canvas id="power-chart" aria-label="最近30秒MS输出原始值曲线" role="img"></canvas></div><p class="subtle">持续接近 ±850 且仍推不动时，继续增大 PID 通常不能提高可用输出；先停止并检查负载、摩擦及供电。</p></div>
+          <div class="chart-footnote"><span id="sample-count">0 个采样点</span><span id="sample-time">最后更新 —</span></div>
+        </section>
+        <section class="card events-card"><div class="card-heading"><div><p class="eyebrow">SESSION LOG</p><h2>操作与通信记录</h2></div><span id="log-count" class="badge muted">0 条</span></div><ol id="event-list" class="event-list"><li class="event-empty">会话事件将在这里记录</li></ol></section>
+      </div>
+    </div>
+    <footer class="page-footer"><span>瓴控 RS485 · 依据 V2.35 协议</span><span>表单修改 → 检查写入应答 → 人工试转 → 保存并上电核验</span></footer>
+  </main>
+
+  <dialog id="confirm-dialog" class="modal"><form method="dialog"><span class="modal-icon">!</span><h2 id="confirm-title"></h2><p id="confirm-description"></p><div class="modal-actions"><button class="button secondary" value="cancel">取消</button><button id="confirm-submit" class="button primary" value="confirm">确认</button></div></form></dialog>
+  <dialog id="token-dialog" class="modal token-modal"><form id="token-form"><span class="eyebrow">LOCAL ACCESS</span><h2>连接调参服务</h2><p>请输入开发板启动时显示的访问令牌。令牌仅保存在当前浏览器会话中。</p><label class="token-label">访问令牌<input id="token-input" type="password" autocomplete="off" required placeholder="粘贴启动日志中的 token"></label><p id="token-error" class="token-error" role="alert"></p><div class="modal-actions"><button class="button primary" type="submit">验证并进入</button></div></form></dialog>
+</body>
+</html>
