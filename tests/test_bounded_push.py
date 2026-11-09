@@ -101,7 +101,9 @@ class BoundedPushTests(unittest.TestCase):
     def runner(self, outcomes, start=-10., **settings):
         config = json.loads((ROOT / "config/robot.json").read_text())
         config["verification"] = {"tolerance_mm": .5, "samples": 2, "interval_s": .001}
-        config["push_correction"].update(settings)
+        # Production robot.json omits push_correction and relies on the
+        # defaults in control.config.push_correction_settings().
+        config.setdefault("push_correction", {}).update(settings)
         vision = Vision(start)
         motors = Motors(vision, outcomes)
         planner = FakePlanner()
@@ -379,7 +381,7 @@ class CorrectionGeometryTests(unittest.TestCase):
                            ("speed_mm_s", 1.1), ("min_progress_mm", 0.)):
             with self.subTest(key=key):
                 altered = copy.deepcopy(config)
-                altered["push_correction"][key] = value
+                altered.setdefault("push_correction", {})[key] = value
                 with self.assertRaises(ValueError):
                     validate_config(altered)
         self.assertEqual(push_correction_settings(config)["max_steps"], 3)
