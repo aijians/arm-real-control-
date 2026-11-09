@@ -82,7 +82,7 @@ class FreeRetryTests(unittest.TestCase):
 
     def test_retiming_preserves_route_and_can_only_select_free_profile(self):
         h=hardware();s=segment_settings(h)
-        original=phase([[169.,20.],[168.8,20.]],times=[0.,.02]);saved=copy.deepcopy(original)
+        original=phase([[169.,20.],[168.9,20.]],times=[0.,.01]);saved=copy.deepcopy(original)
         slow=free_retry_phase(original,s)
         self.assertEqual(original,saved)
         self.assertEqual(slow,free_retry_phase(slow,s))
@@ -96,24 +96,24 @@ class FreeRetryTests(unittest.TestCase):
             with self.subTest(speed=speed),self.assertRaises(ValueError):segment_settings(bad)
 
     def test_real_move_emits_five_degree_speed_field_and_unchanged_nominal_targets(self):
-        h=hardware();p=phase([[169.,20.],[168.8,20.],[168.6,20.]])
+        h=hardware();p=phase([[169.,20.],[168.9,20.],[168.8,20.]])
         p=free_retry_phase(p,segment_settings(h));d=VirtualDrive(model_q=[169.,20.],settings=h)
         result=d.run(p)
         self.assertEqual(result['status'],'completed')
         self.assertEqual(result['motion_diagnostics']['execution']['segment_control']['speed_deg_s'],5.)
         self.assertEqual([int.from_bytes(w[9:13],'little') for _,_,_,w in d.a6()], [500,500])
-        self.assertEqual([int.from_bytes(w[6:9],'little') for _,_,_,w in d.a6()], [16880,16860])
+        self.assertEqual([int.from_bytes(w[6:9],'little') for _,_,_,w in d.a6()], [16890,16880])
         self.assertEqual(d.pair._settling_bias_centi,[0,0])
 
     def test_real_move_records_endpoint_oscillation_without_speed_change(self):
         def oscillate(d):
             if not d.a6(0): return
             angle=2*math.pi*d.elapsed/.55
-            d.q[0]=168.8+.55*math.sin(angle)
+            d.q[0]=168.9+.55*math.sin(angle)
             d.velocity[0]=.55*2*math.pi/.55*math.cos(angle)
         d=VirtualDrive(model_q=[169.,20.],settings=hardware(),disturbance=oscillate)
         with self.assertRaises(HardwareError) as caught:
-            d.run(phase([[169.,20.],[168.8,20.]],times=[0.,.1]))
+            d.run(phase([[169.,20.],[168.9,20.]],times=[0.,.1]))
         self.assertEqual(caught.exception.reason,'motion_goal_settle_timeout')
         e=caught.exception.details['motion_diagnostics']['execution']
         self.assertEqual(e['endpoint_oscillating_axes'],[True,False])
@@ -125,7 +125,7 @@ class FreeRetryTests(unittest.TestCase):
             if d.a6(0): d.q[0],d.velocity[0]=169.25,0.
         d=VirtualDrive(model_q=[169.,20.],settings=hardware(),disturbance=stuck)
         with self.assertRaises(HardwareError) as caught:
-            d.run(phase([[169.,20.],[168.8,20.]],times=[0.,.1]))
+            d.run(phase([[169.,20.],[168.9,20.]],times=[0.,.1]))
         self.assertEqual(caught.exception.reason,'motion_goal_settle_timeout')
         self.assertEqual(caught.exception.details['motion_diagnostics']['execution']['endpoint_oscillating_axes'],[False,False])
 

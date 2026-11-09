@@ -87,6 +87,7 @@
       "free_retry_speed_deg_s": 5.0,
       "push_speed_deg_s": 60.0,
       "free_max_step_deg": 0.2,
+      "free_upper_max_step_deg": 0.1,
       "push_initial_step_deg": 0.2,
       "push_step_increment_deg": 0.2,
       "push_points_per_step": 3,

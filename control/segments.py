@@ -9,6 +9,9 @@ DEFAULTS = {
     "free_retry_speed_deg_s": 5.0,
     "push_speed_deg_s": 60.0,
     "free_max_step_deg": 0.2,
+    # Upper arm (axis 0) only, for every non-push phase (Free/withdraw/return).
+    # The lower arm (axis 1) keeps free_max_step_deg.
+    "free_upper_max_step_deg": 0.1,
     "push_initial_step_deg": 0.2,
     "push_step_increment_deg": 0.2,
     "push_points_per_step": 3,
@@ -30,7 +33,7 @@ def segment_settings(hardware):
     count = result["push_points_per_step"]
     if type(count) is not int or not 1 <= count <= 20:
         raise ValueError("invalid segmented_motion.push_points_per_step")
-    if not (0.05 <= result["free_max_step_deg"] <= 0.2
+    if not (0.05 <= result["free_upper_max_step_deg"] <= result["free_max_step_deg"] <= 0.2
             and 0.05 <= result["push_initial_step_deg"] <= result["push_max_step_deg"] <= 1.2
             and result["push_step_increment_deg"] <= result["push_max_step_deg"]):
         raise ValueError("inconsistent segmented_motion angle steps")
@@ -50,10 +53,17 @@ def phase_profile(settings, name, *, retry_after_oscillation=False):
     speed = settings["push_speed_deg_s" if push else "free_speed_deg_s"]
     if retry_after_oscillation:
         speed = settings["free_retry_speed_deg_s"]
+    axis_caps = ([settings["push_max_step_deg"]]*2 if push else
+                 [settings["free_upper_max_step_deg"], settings["free_max_step_deg"]])
     return {"version": 1, "speed_deg_s": speed,
-            "max_step_deg": settings["push_max_step_deg" if push else "free_max_step_deg"],
+            "max_step_deg": max(axis_caps), "axis_max_step_deg": axis_caps,
             "mode": "progressive_push" if push else "small_step_free",
             "bias_enabled": False, "speed_shifts_enabled": False}
+
+
+def axis_cap(cap, axis):
+    """Per-axis step cap: Free-family caps are [upper, lower], push caps scalar."""
+    return cap[axis] if isinstance(cap, (list, tuple)) else cap
 
 
 def free_retry_phase(phase, settings):
@@ -123,7 +133,7 @@ def resample_route(path, distances, centres, settings, name, motors, chord_safe,
     position, postcontact_nodes = 0.0, 0
     while position < len(path)-1-1e-9:
         progress = distance_at(position)
-        cap = settings["free_max_step_deg"]
+        cap = [settings["free_upper_max_step_deg"], settings["free_max_step_deg"]]
         if push:
             level = 0 if progress < max(0.0, gap_mm)-1e-9 else postcontact_nodes//settings["push_points_per_step"]
             cap = min(settings["push_max_step_deg"], settings["push_initial_step_deg"]
@@ -132,9 +142,10 @@ def resample_route(path, distances, centres, settings, name, motors, chord_safe,
 
         def fits(end):
             q = at(end, path)
-            return (max(abs(math.degrees(b-a)) for a, b in zip(start, q)) <= cap+1e-10
-                    and all(abs(b-a) <= math.floor(cap*m["ratio"]*100+1e-7)
-                            for a, b, m in zip(start_wire, wire(q), motors)))
+            return (all(abs(math.degrees(b-a)) <= axis_cap(cap, i)+1e-10
+                        for i, (a, b) in enumerate(zip(start, q)))
+                    and all(abs(b-a) <= math.floor(axis_cap(cap, i)*m["ratio"]*100+1e-7)
+                            for i, (a, b, m) in enumerate(zip(start_wire, wire(q), motors))))
 
         boundary = boundaries[bisect.bisect_right(boundaries, position+1e-9)]
         low, high = position, float(boundary)

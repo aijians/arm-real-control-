@@ -19,7 +19,7 @@ from .trajectory import WaypointCursor, GoalQualification
 from .kinematics import PlanarArm
 from .recovery import SpeedRecovery, recovery_settings
 from .motion_policy import MotionRecovery, motion_policy_settings, angle_bias_profile
-from .segments import segment_settings, phase_profile
+from .segments import segment_settings, phase_profile, axis_cap as segment_axis_cap
 
 from .protocol import (angle_from_reply, extract_frame, make_frame,
                        position_frame, state_from_reply)
@@ -673,9 +673,14 @@ class MotorPair:
             retry_after_oscillation=phase.get("free_retry_after_oscillation", False)) if self.segments["enabled"] else None
         speed_cap = self.config["max_speed_deg_s"] if segment_profile is None else segment_profile["speed_deg_s"]
         step_caps = phase.get("segment_step_caps_deg") if segment_profile is not None else None
+        def valid_cap(v):
+            # Free-family caps are [upper, lower]; push caps are one scalar.
+            values = v if isinstance(v, list) and len(v) == 2 else [v, v] if type(v) in (int, float) else None
+            return values is not None and all(
+                type(c) in (int, float) and math.isfinite(c)
+                and 0 < c <= segment_profile["axis_max_step_deg"][i]+1e-9 for i, c in enumerate(values))
         if step_caps is not None and (not isinstance(step_caps, list) or len(step_caps) != len(points)-1
-                or any(type(v) not in (int,float) or not math.isfinite(v)
-                       or not 0 < v <= segment_profile["max_step_deg"]+1e-9 for v in step_caps)):
+                or not all(valid_cap(v) for v in step_caps)):
             raise ValueError("Invalid per-node segment step caps")
         for point in points:
             stamp = _finite(point["time_s"], "time_s")
@@ -694,12 +699,13 @@ class MotorPair:
                     raise ValueError("Mapped target outside A6 range")
             if result:
                 dt = stamp - result[-1][0]
-                for motor, a, b in zip(self.motors, result[-1][1], angles):
+                for axis, (motor, a, b) in enumerate(zip(self.motors, result[-1][1], angles)):
                     velocity = abs(math.degrees(b - a)) * motor["ratio"] / dt
                     if velocity > speed_cap + 1e-6:
                         raise ValueError("Trajectory exceeds motor speed limit: " + motor["name"])
                     if segment_profile is not None:
-                        step_cap = segment_profile["max_step_deg"] if step_caps is None else step_caps[len(result)-1]
+                        step_cap = segment_axis_cap(segment_profile["axis_max_step_deg"] if step_caps is None
+                                            else step_caps[len(result)-1], axis)
                         span = abs(math.degrees(b-a))
                         wire_span = abs(round(self._motor_deg(motor, math.degrees(b))*100)
                                         - round(self._motor_deg(motor, math.degrees(a))*100))
@@ -1106,7 +1112,7 @@ class MotorPair:
             previous_target = (last_key[0] if last_key is not None
                 and self._last_target_sent_at[i] >= segment_started_at else
                 round(self._motor_deg(motor, math.degrees(segment_origin_q_rad[i]))*100))
-            if abs(target-previous_target) > math.floor(command_step_limit_deg*motor["ratio"]*100+1e-7):
+            if abs(target-previous_target) > math.floor(segment_axis_cap(command_step_limit_deg, i)*motor["ratio"]*100+1e-7):
                 if trace is not None:
                     trace.record_action({**event, "status": "skipped", "reason": "segment_command_step_exceeds_limit",
                                          "previous_target_motor_deg": previous_target/100})
@@ -1461,7 +1467,8 @@ class MotorPair:
                             previous = (key[0] if key is not None and self._last_target_sent_at[i] >= started else round(self._motor_deg(
                                 self.motors[i], math.degrees(points[0][1][i]))*100))
                             upcoming = round(self._motor_deg(self.motors[i], math.degrees(points[cursor.index+1][1][i]))*100)
-                            upcoming_cap = segment_profile["max_step_deg"] if segment_caps is None else segment_caps[cursor.index]
+                            upcoming_cap = segment_axis_cap(segment_profile["axis_max_step_deg"] if segment_caps is None
+                                                    else segment_caps[cursor.index], i)
                             if abs(upcoming-previous) > math.floor(upcoming_cap*self.motors[i]["ratio"]*100+1e-7):
                                 segment_written = False
                 changed = (cursor.advance(now, state["q_rad"], state["axis_stamp_monotonic_s"])
@@ -1596,7 +1603,7 @@ class MotorPair:
                         recovery_validator=recovery_angle_safe,
                         axis_min_speed_deg_s=speed_floors, speed_tiers=speed_tiers,
                         command_speed_caps_deg_s=speed_caps,
-                        command_step_limit_deg=((segment_profile["max_step_deg"] if not segment_caps
+                        command_step_limit_deg=((segment_profile["axis_max_step_deg"] if not segment_caps
                                                  else segment_caps[max(0,cursor.index-1)]) if segmented else None),
                         segment_origin_q_rad=(points[0][1] if segmented else None),
                         segment_started_at=(started if segmented else None),
