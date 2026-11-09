@@ -84,6 +84,7 @@
     "segmented_motion": {
       "enabled": true,
       "free_speed_deg_s": 10.0,
+      "free_retry_speed_deg_s": 5.0,
       "push_speed_deg_s": 60.0,
       "free_max_step_deg": 0.2,
       "push_initial_step_deg": 0.2,
@@ -162,7 +163,7 @@
           0.637538636371788,
           -0.7704183844724899
         ],
-        "approach_offset_mm": 5.0,
+        "approach_offset_mm": 10.0,
         "contact_segment_canonical_xy_mm": [
           [
             107.63,

@@ -669,7 +669,8 @@ class MotorPair:
         if not isinstance(points, list) or not points:
             raise ValueError("Phase requires a non-empty points list")
         result = []
-        segment_profile = phase_profile(self.segments, phase.get("phase")) if self.segments["enabled"] else None
+        segment_profile = phase_profile(self.segments, phase.get("phase"),
+            retry_after_oscillation=phase.get("free_retry_after_oscillation", False)) if self.segments["enabled"] else None
         speed_cap = self.config["max_speed_deg_s"] if segment_profile is None else segment_profile["speed_deg_s"]
         step_caps = phase.get("segment_step_caps_deg") if segment_profile is not None else None
         if step_caps is not None and (not isinstance(step_caps, list) or len(step_caps) != len(points)-1
@@ -1270,7 +1271,8 @@ class MotorPair:
         self._motion_trace = trace
         state = target = elapsed = progress_at = progress_q = None
         segmented = self.segments["enabled"]
-        segment_profile = phase_profile(self.segments, phase.get("phase")) if segmented else None
+        segment_profile = phase_profile(self.segments, phase.get("phase"),
+            retry_after_oscillation=phase.get("free_retry_after_oscillation", False)) if segmented else None
         adaptive = self.motion_policy["enabled"] and not segmented
         recovery = (MotionRecovery(self.recovery_config, self.motors, phase.get("phase"), self.motion_policy,
                         (self.config["min_speed_deg_s"],self.config["max_speed_deg_s"],self.config["still_speed_deg_s"]))
@@ -1394,6 +1396,9 @@ class MotorPair:
                     "settling_bias_retracted": list(self._settling_bias_retracted),
                     "bias_policy": "disabled" if segmented else ("independent_axis_error_boost" if adaptive else "legacy"),
                     "segment_control": segment_profile,
+                    "endpoint_oscillating_axes": [bool(segmented and phase.get("phase") == "free"
+                        and cursor.at_endpoint and i in active_indices and recovery.oscillating(i))
+                        for i in range(2)],
                     "cartesian_bias_lead_mm": cart_lead,
                     "cartesian_bias_retracted": cart_retracted,
                     "cartesian_command_pending": pending_cart is not None,
@@ -1505,7 +1510,12 @@ class MotorPair:
                         qualifier.reset_after_command()
                         holding_at = None
                         stage, stage_started = "settling", now
-                elif not segmented:
+                elif segmented:
+                    # Diagnose only. Never re-send A6 or change speed here;
+                    # the task layer may use a slower *next* Free attempt.
+                    if phase.get("phase") == "free" and cursor.at_endpoint and now >= endpoint_due:
+                        recovery.observe_goal(state, points[-1][1])
+                else:
                     if not qualifier.armed:
                         for i in active_indices:
                             if (errors[i] > tolerances[i]+1e-9

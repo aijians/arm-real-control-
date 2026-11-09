@@ -311,8 +311,9 @@ class CorrectionGeometryTests(unittest.TestCase):
             phase = planner.withdraw(q, "蓝", "+x", {"蓝": -21.5, "橙": 15.},
                                       from_reference=True, reference_extension_mm=2.)
         self.assertAlmostEqual(phase["reference_start_mm"][0], -20.)
-        self.assertAlmostEqual(phase["reference_target_mm"][0], -27.)
-        self.assertEqual(phase["withdraw_distance_mm"], 7.)
+        # Right-side clearance is 10 mm; retract the 2 mm extension as well.
+        self.assertAlmostEqual(phase["reference_target_mm"][0], -32.)
+        self.assertEqual(phase["withdraw_distance_mm"], 12.)
         self.assertEqual(phase["reference_contact_tolerance_mm"], 2.)
         self.assertEqual(checked.call_args.args[-1]["reference_contact_tolerance_mm"], 2.)
         with self.assertRaisesRegex(PlanError, "contact_start_position_error"):
