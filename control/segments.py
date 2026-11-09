@@ -6,6 +6,7 @@ import math
 DEFAULTS = {
     "enabled": False,
     "free_speed_deg_s": 10.0,
+    "free_retry_speed_deg_s": 5.0,
     "push_speed_deg_s": 60.0,
     "free_max_step_deg": 0.2,
     "push_initial_step_deg": 0.2,
@@ -37,15 +38,39 @@ def segment_settings(hardware):
             or (result["enabled"] and max(result["free_speed_deg_s"], result["push_speed_deg_s"])
                 > hardware.get("max_speed_deg_s", 360))):
         raise ValueError("segmented_motion exceeds motor speed cap")
+    if result["enabled"] and not hardware.get("min_speed_deg_s", 2.) <= result["free_retry_speed_deg_s"] <= result["free_speed_deg_s"]:
+        raise ValueError("invalid segmented_motion.free_retry_speed_deg_s")
     return result
 
 
-def phase_profile(settings, name):
+def phase_profile(settings, name, *, retry_after_oscillation=False):
+    if type(retry_after_oscillation) is not bool or (retry_after_oscillation and name != "free"):
+        raise ValueError("oscillation retry profile requires a free phase")
     push = name in ("push", "push_correction")
-    return {"version": 1, "speed_deg_s": settings["push_speed_deg_s" if push else "free_speed_deg_s"],
+    speed = settings["push_speed_deg_s" if push else "free_speed_deg_s"]
+    if retry_after_oscillation:
+        speed = settings["free_retry_speed_deg_s"]
+    return {"version": 1, "speed_deg_s": speed,
             "max_step_deg": settings["push_max_step_deg" if push else "free_max_step_deg"],
             "mode": "progressive_push" if push else "small_step_free",
             "bias_enabled": False, "speed_shifts_enabled": False}
+
+
+def free_retry_phase(phase, settings):
+    """Apply a slower, fixed Free speed between attempts, never during a move.
+
+    Retiming preserves the planned route and the executor's velocity checks.
+    This returns a new phase and is idempotent; settings remain task-independent.
+    """
+    if not settings["enabled"] or phase.get("phase") != "free":
+        raise ValueError("slow Free retry requires segmented free motion")
+    profile = phase_profile(settings, "free", retry_after_oscillation=True)
+    scale = (1. if phase.get("free_retry_after_oscillation") else
+             settings["free_speed_deg_s"] / profile["speed_deg_s"])
+    return {**phase, "free_retry_after_oscillation": True,
+            "segment_control": profile,
+            "points": [{**p, "time_s": p["time_s"] * scale,
+                        "q_rad": list(p["q_rad"])} for p in phase["points"]]}
 
 
 def resample_route(path, distances, centres, settings, name, motors, chord_safe, gap_mm=0.0):
