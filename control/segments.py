@@ -16,6 +16,13 @@ DEFAULTS = {
     "push_step_increment_deg": 0.2,
     "push_points_per_step": 3,
     "push_max_step_deg": 1.0,
+    # Continuous ("carrot") streaming: each axis's A6 speed field is
+    # stream_speed_ratio * node increment * command rate, so the drive runs
+    # just behind the written target and never catches it. A node may be
+    # released while the arm is within *_max_lead_deg of the current node.
+    "stream_speed_ratio": 0.5,
+    "free_max_lead_deg": 0.5,
+    "push_max_lead_deg": 1.2,
 }
 
 
@@ -37,6 +44,9 @@ def segment_settings(hardware):
             and 0.05 <= result["push_initial_step_deg"] <= result["push_max_step_deg"] <= 1.2
             and result["push_step_increment_deg"] <= result["push_max_step_deg"]):
         raise ValueError("inconsistent segmented_motion angle steps")
+    if not (0 < result["stream_speed_ratio"] <= 1
+            and 0.3 <= result["free_max_lead_deg"] <= 1.8 and 0.3 <= result["push_max_lead_deg"] <= 1.8):
+        raise ValueError("invalid segmented_motion streaming settings")
     if (max(result["free_speed_deg_s"], result["push_speed_deg_s"]) > 360
             or (result["enabled"] and max(result["free_speed_deg_s"], result["push_speed_deg_s"])
                 > hardware.get("max_speed_deg_s", 360))):
@@ -55,10 +65,32 @@ def phase_profile(settings, name, *, retry_after_oscillation=False):
         speed = settings["free_retry_speed_deg_s"]
     axis_caps = ([settings["push_max_step_deg"]]*2 if push else
                  [settings["free_upper_max_step_deg"], settings["free_max_step_deg"]])
-    return {"version": 1, "speed_deg_s": speed,
+    ratio = settings["stream_speed_ratio"]
+    if retry_after_oscillation:
+        ratio *= settings["free_retry_speed_deg_s"] / settings["free_speed_deg_s"]
+    return {"version": 2, "speed_deg_s": speed,
             "max_step_deg": max(axis_caps), "axis_max_step_deg": axis_caps,
+            "stream_speed_ratio": ratio,
+            "max_lead_deg": settings["push_max_lead_deg" if push else "free_max_lead_deg"],
             "mode": "progressive_push" if push else "small_step_free",
             "bias_enabled": False, "speed_shifts_enabled": False}
+
+
+# Worst feedback age assumed when limiting a streamed speed field.
+STREAM_AGE_S = 0.1
+
+
+def stream_speed_deg_s(profile, increment_deg, command_rate_hz):
+    """A6 speed field for one axis while streaming nodes.
+
+    Slower than the node release rate (ratio < 1), so the drive follows the
+    written target without catching it; and low enough that travel during a
+    worst-case feedback age stays inside the allowed lead, so the next node
+    remains direction-safe without waiting for the arm to stop.
+    """
+    speed = profile["stream_speed_ratio"] * abs(increment_deg) * command_rate_hz
+    speed = min(speed, profile["speed_deg_s"], (profile["max_lead_deg"] - 0.05) / STREAM_AGE_S)
+    return max(0.5, speed)
 
 
 def axis_cap(cap, axis):

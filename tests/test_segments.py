@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from control.motors import HardwareError, MotorPair
-from control.segments import phase_profile, resample_route, segment_settings
+from control.segments import phase_profile, resample_route, segment_settings, stream_speed_deg_s
 from virtual_drive import VirtualDrive, config, phase
 
 
@@ -103,14 +103,27 @@ class RouteTests(unittest.TestCase):
 
 class ExecutionTests(unittest.TestCase):
     def assert_wires(self, d, planned, cap, step):
+        """Targets are nominal nodes, steps bounded, and each A6 speed field is
+        the streamed field for that node (never above the phase cap)."""
+        pts=planned['points']
         nominal = [{round(d.pair._motor_deg(m, math.degrees(p['q_rad'][i]))*100)
-                    for p in planned['points']} for i,m in enumerate(d.pair.motors)]
+                    for p in pts} for i,m in enumerate(d.pair.motors)]
+        profile=phase_profile(
+            d.pair.segments, planned['phase'], retry_after_oscillation=planned.get('free_retry_after_oscillation', False))
+        fields=[{} for _ in d.pair.motors]
+        for k in range(1,len(pts)):
+            for i,m in enumerate(d.pair.motors):
+                key=round(d.pair._motor_deg(m, math.degrees(pts[k]['q_rad'][i]))*100)
+                inc=abs(math.degrees(pts[k]['q_rad'][i]-pts[k-1]['q_rad'][i]))*m['ratio']
+                fields[i].setdefault(key,set()).add(round(stream_speed_deg_s(profile,inc,d.pair.config['command_rate_hz'])*100))
         previous=[round(d.pair._motor_deg(m,math.degrees(planned['points'][0]['q_rad'][i]))*100)
                   for i,m in enumerate(d.pair.motors)]
         for _, i, _, w in d.a6():
             target=int.from_bytes(w[6:9],'little')
-            self.assertEqual(int.from_bytes(w[9:13],'little'),round(cap*100))
+            field=int.from_bytes(w[9:13],'little')
+            self.assertLessEqual(field,round(cap*100))
             self.assertIn(target,nominal[i])
+            self.assertIn(field,fields[i].get(target,set()))
             axis_step=step[i] if isinstance(step,list) else step
             self.assertLessEqual(abs(target-previous[i]),math.floor(axis_step*d.pair.motors[i]['ratio']*100+1e-7))
             previous[i]=target
@@ -237,6 +250,60 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(attempt(-40.,168.8),0)
         # A moving reversal keeps the global 60 deg/s budget: skip.
         self.assertEqual(attempt(-10.,169.1),0)
+
+    def test_streaming_free_never_stops_mid_route(self):
+        pts=[[169.-i*.1,20.] for i in range(61)]                    # 6 deg in 0.1 deg nodes
+        p=phase(pts,times=[i*.01 for i in range(61)])
+        trace=[]
+        def watch(d):trace.append((d.elapsed,d.q[0],d.velocity[0],d.target[0]))
+        d=VirtualDrive(model_q=pts[0],settings=settings(),disturbance=watch)
+        self.assertEqual(d.run(p)['status'],'completed')
+        self.assertEqual(d.unsafe_directions,[])
+        moving=[(t,q,v) for t,q,v,_ in trace if 168.95>=q>=163.3]
+        stops=[]; still_since=None
+        for t,q,v in moving:
+            if abs(v)<1e-9:
+                still_since=t if still_since is None else still_since
+            else:
+                if still_since is not None:stops.append(t-still_since)
+                still_since=None
+        # Previously the arm stopped at every node for >= 0.10 s.
+        self.assertLess(max(stops,default=0.),.06)
+        lead=max(abs(target-q) for _,q,_,target in trace)
+        self.assertLessEqual(lead,.5+.1+1e-6)                       # free lead + one node
+        self.assert_wires(d,p,10.,[.1,.2])
+
+    def test_push_keeps_advancing_when_load_holds_the_arm_behind_each_target(self):
+        pts=[[159.-i*.2,20.] for i in range(11)]
+        final=round(pts[-1][0],2)
+        def load(d):
+            # The contact holds the arm 0.36 deg short of every target except
+            # the last (the 5d42f0cd stall: error 0.36 > node tolerance 0.3).
+            if d.a6(0) and round(d.target[0],2)!=final and d.q[0]<d.target[0]+.36:
+                d.q[0],d.velocity[0]=d.target[0]+.36,0.
+        p=phase(pts,name='push');d=VirtualDrive(model_q=pts[0],settings=settings(),disturbance=load)
+        self.assertEqual(d.run(p)['status'],'completed')
+        self.assertEqual(d.unsafe_directions,[])
+        self.assert_wires(d,p,60.,1.)
+
+    def test_isolated_speed_readings_during_hold_do_not_restart_it(self):
+        class Blippy(VirtualDrive):
+            next_blip=None
+            def refresh(self,axis,command):
+                super().refresh(axis,command)
+                if (command==0x9C and axis==0 and self.a6(0) and abs(self.q[0]-168.8)<1e-6
+                        and (self.next_blip is None or self.elapsed>=self.next_blip)):
+                    self.next_blip=self.elapsed+.4
+                    self.pair._feedback[0].update(speed_deg_s=2.)
+        pts=[[169.,20.],[168.9,20.],[168.8,20.]]
+        p=phase(pts,times=[0.,.1,.2])
+        d=Blippy(model_q=pts[0],settings=settings(goal_hold_s=1.,no_progress_s=2.))
+        result=d.run(p)
+        self.assertEqual(result['status'],'completed')
+        e=result['motion_diagnostics']['execution']
+        self.assertGreater(e['goal_speed_blips_tolerated'],0)
+        blip=[x for x in e['goal_stability_events'] if x['kind']=='tolerated_speed_blip'][0]
+        self.assertEqual(blip['speeds_deg_s'][0],2.)
 
 
 if __name__ == '__main__':unittest.main()

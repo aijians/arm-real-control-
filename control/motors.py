@@ -19,7 +19,7 @@ from .trajectory import WaypointCursor, GoalQualification
 from .kinematics import PlanarArm
 from .recovery import SpeedRecovery, recovery_settings
 from .motion_policy import MotionRecovery, motion_policy_settings, angle_bias_profile
-from .segments import segment_settings, phase_profile, axis_cap as segment_axis_cap
+from .segments import segment_settings, phase_profile, axis_cap as segment_axis_cap, stream_speed_deg_s
 
 from .protocol import (angle_from_reply, extract_frame, make_frame,
                        position_frame, state_from_reply)
@@ -533,7 +533,7 @@ class MotorPair:
 
     def _snapshot(self, since=None):
         now = time.monotonic()
-        angles, speeds, motor_angles, axis_stamps = [], [], [], []
+        angles, speeds, motor_angles, axis_stamps, speed_stamps = [], [], [], [], []
         for i, (motor, reply) in enumerate(zip(self.motors, self._feedback)):
             timeout = (self.config["feedback_timeout_s"] if since is not None or self._active_axes[i]
                        else max(self.config["inactive_feedback_timeout_s"],
@@ -554,9 +554,10 @@ class MotorPair:
             angles.append(math.radians(angle))
             speeds.append(math.radians(reply["speed_deg_s"] / scale))
             axis_stamps.append(min(reply["angle_stamp"], reply["speed_stamp"]))
+            speed_stamps.append(reply["speed_stamp"])
         selected = [stamp for stamp, active in zip(axis_stamps, self._active_axes) if active]
         return {"q_rad": angles, "speed_rad_s": speeds, "motor_deg": motor_angles,
-                "axis_stamp_monotonic_s": axis_stamps,
+                "axis_stamp_monotonic_s": axis_stamps, "speed_stamp_monotonic_s": speed_stamps,
                 "stamp_monotonic_s": min(selected or axis_stamps)}
 
     def _read_state(self, timeout_s=None):
@@ -1303,7 +1304,12 @@ class MotorPair:
                                                                   "planned_q_rad": points[0][1]})
             cursor = WaypointCursor(points, self.config["waypoint_tolerance_ratio"],
                                     1/self.config["command_rate_hz"],
-                                    zero_span_tolerance_deg=self.config["angle_tolerance_deg"])
+                                    zero_span_tolerance_deg=self.config["angle_tolerance_deg"],
+                                    # Segmented phases stream nodes ahead of the arm (see
+                                    # segments.stream_speed_deg_s) instead of stop-and-go.
+                                    lead_tolerance_deg=(segment_profile["max_lead_deg"] if segmented else None),
+                                    require_fresh_feedback=not segmented,
+                                    follow_planned_time=not segmented)
             # Quantization-equivalent paths need no physical command on that axis.
             self._active_axes = [len({round(self._motor_deg(motor, math.degrees(q[i]))*100)
                                       for _, q in points}) > 1
@@ -1404,6 +1410,9 @@ class MotorPair:
                     "final_goal_errors_deg": errors,
                     "goal_arrived": qualifier.armed, "goal_stable_s": qualifier.stable_s,
                     "goal_guard_failure": qualifier.failure,
+                    "goal_stability_resets": qualifier.resets,
+                    "goal_speed_blips_tolerated": qualifier.blips_tolerated,
+                    "goal_stability_events": list(qualifier.events),
                     "active_command_motor_deg": [None if k is None else k[0]/100 for k in self._last_targets],
                     "active_command_in_acceptance_band": self._active_command_in_acceptance_band(points[-1][1]),
                     "active_command_acknowledged": list(self._last_target_acked),
@@ -1601,7 +1610,12 @@ class MotorPair:
                 if now-last_command >= 1/self.config["command_rate_hz"] and not qualifier.armed:
                     speed_floors, speed_tiers, speed_caps = recovery.profiles(self.config["max_speed_deg_s"])
                     if segmented:
-                        speed_floors = speed_caps = [segment_profile["speed_deg_s"]]*2
+                        # Per-axis field proportional to this node's increment keeps
+                        # both axes in step and slower than node release.
+                        seg = max(1, cursor.index)
+                        speed_floors = speed_caps = [stream_speed_deg_s(segment_profile,
+                            abs(math.degrees(points[seg][1][i]-points[seg-1][1][i]))*self.motors[i]["ratio"],
+                            self.config["command_rate_hz"]) for i in range(2)]
                         speed_tiers = [0, 0]
                     previous_writes = list(self._last_target_sent_at)
                     written = self._send_targets(command, planned_directions=cursor.planned_directions(),
