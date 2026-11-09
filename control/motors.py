@@ -892,9 +892,18 @@ class MotorPair:
                 0. if last_key is None else last_key[2]/100., measured_speed)
             * (query_age + send_delay + wire_time) + 0.015
         )
+        # Segmented phases cap every A6 speed field (Free 10/5, Push 60), so
+        # a same-direction continuation bounds travel during the feedback age
+        # by the fields actually in force (last write, this write) and the
+        # measured speed, not the global driver cap. Reversals below keep the
+        # global moving_uncertainty.
+        segment_moving_uncertainty = (
+            max(command_cap, 0. if last_key is None else last_key[2]/100., measured_speed)
+            * (query_age + send_delay + wire_time) + 0.015
+        ) if command_step_limit_deg is not None else moving_uncertainty
         same_dir_uncertainty = (
             stationary_uncertainty if stationary_confirmed
-            else moving_uncertainty
+            else segment_moving_uncertainty
         )
 
         retract_latch_centi = None
@@ -1483,6 +1492,17 @@ class MotorPair:
                     pending_cart = None
                     progress_at, progress_q = [now, now], list(state["q_rad"])
                     segment_progress_at, segment_progress_q = now, list(state["q_rad"])
+                # A final node only 0.01-0.02 deg past the previous one may never
+                # be direction-safe to send. If every active axis's last write
+                # already sits in the endpoint acceptance band, the endpoint is
+                # commanded; GoalQualification and its settle/hold deadlines
+                # decide success. Without this, holding at the goal would trip
+                # the segment no-progress check after no_progress_s.
+                if (segmented and not segment_written and cursor.at_endpoint
+                        and all(self._last_target_sent_at[i] >= started for i in active_indices)
+                        and all(self._active_command_in_acceptance_band(points[-1][1])[i]
+                                for i in active_indices)):
+                    segment_written = True
                 if segmented:
                     if max(abs(math.degrees(a-b)) for a, b in zip(state["q_rad"], segment_progress_q)) >= self.config["progress_deg"]-1e-9:
                         segment_progress_at, segment_progress_q = now, list(state["q_rad"])

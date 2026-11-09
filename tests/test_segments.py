@@ -194,5 +194,49 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(d.run(p)['status'],'completed')
         self.assert_wires(d,p,10.,[.1,.2])
 
+    def test_tiny_final_residual_does_not_trip_no_progress_while_holding(self):
+        # The last node is 0.01 deg past the previous one: below the 0.015 deg
+        # direction floor, never sendable, yet the previous write is already
+        # in the endpoint band (c7 retry routes end like this).
+        pts=[[169.,20.],[168.9,20.],[168.8,20.],[168.79,20.]]
+        # Production holds 3 s, longer than the 2 s segment no-progress window.
+        p=phase(pts,times=[0.,.1,.2,.3]);d=VirtualDrive(model_q=pts[0],settings=settings(goal_hold_s=3.,no_progress_s=2.))
+        result=d.run(p)
+        self.assertEqual(result['status'],'completed')
+        self.assertEqual(d.unsafe_directions,[])
+        self.assertTrue(result['motion_diagnostics']['execution']['active_command_in_acceptance_band'][0])
+
+    def test_same_direction_nodes_stream_without_stopping_at_each_node(self):
+        pts=[[169.-i*.1,20.] for i in range(31)]
+        p=phase(pts,times=[i*.02 for i in range(31)]);d=VirtualDrive(model_q=pts[0],settings=settings())
+        self.assertEqual(d.run(p)['status'],'completed')
+        sent=[at for at,i,_,_ in d.a6() if i==0]
+        self.assertEqual(len(sent),30)
+        intervals=sorted(b-a for a,b in zip(sent,sent[1:]))
+        # Previously each node waited for >=0.10 s of confirmed stillness (~0.17 s).
+        self.assertLess(intervals[len(intervals)//2],.08)
+        self.assertEqual({w[5] for _,i,_,w in d.a6() if i==0},{1})
+        self.assert_wires(d,p,10.,[.1,.2])
+
+    def test_same_direction_send_still_respects_reported_speed_and_reversal_margin(self):
+        def attempt(speed, target_deg):
+            d=VirtualDrive(model_q=[168.95,20.],settings=settings());p=d.pair
+            p._last_targets[0]=(16890,1,1000,0);p._last_target_sent_at[0]=d.now-.2
+            d.velocity[0]=speed
+            for i in (0,1):d.refresh(i,0x94);d.refresh(i,0x9C)
+            d.now=round(d.now+.01,9)
+            q=list(map(math.radians,[target_deg,20.]))
+            with patch('control.motors.time.monotonic',lambda:d.now):
+                return p._send_targets(q,nominal_q_rad=q,command_axes=[True,False],
+                    axis_min_speed_deg_s=[10.,10.],speed_tiers=[0,0],command_speed_caps_deg_s=[10.,10.],
+                    command_step_limit_deg=[.1,.2],segment_origin_q_rad=list(map(math.radians,[169.,20.])),
+                    segment_started_at=d.now-2)
+        # 0.15 deg ahead, moving at the 10 deg/s field: bounded travel is ~0.13 deg.
+        self.assertEqual(attempt(-10.,168.8),1)
+        # A reported 40 deg/s exceeds the field and widens the margin: skip.
+        self.assertEqual(attempt(-40.,168.8),0)
+        # A moving reversal keeps the global 60 deg/s budget: skip.
+        self.assertEqual(attempt(-10.,169.1),0)
+
 
 if __name__ == '__main__':unittest.main()
