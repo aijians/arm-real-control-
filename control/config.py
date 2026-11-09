@@ -7,6 +7,7 @@ import tempfile
 
 from .recovery import recovery_settings
 from .motion_policy import motion_policy_settings
+from .segments import segment_settings
 
 
 def push_correction_settings(config):
@@ -69,6 +70,7 @@ def save_json(result, path):
 
 
 def validate_config(config):
+    segment_settings(config.get("hardware", {}))
     recovery_settings(config.get("hardware", {}))
     motion_policy_settings(config.get("hardware", {}))
     push_correction_settings(config)

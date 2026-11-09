@@ -45,12 +45,12 @@ class AngleZoneTests(unittest.TestCase):
             cfg=configured();cfg['motion_recovery']['axis_angle_bias']=rules
             with self.subTest(rules=rules),self.assertRaises(ValueError):motion_policy_settings(cfg)
 
-    def test_production_configuration_enables_recall_and_small_upper_bias(self):
+    def test_production_configuration_uses_segments_without_recovery(self):
         cfg,_=load_config(Path(__file__).resolve().parents[1]);h=cfg['hardware']
         policy=motion_policy_settings(h)
-        self.assertTrue(policy['bias_retraction_requires_crossing'])
-        self.assertEqual(policy['bias_retraction_speed_deg_s'],18.)
-        self.assertEqual(policy['axis_angle_bias']['upper'],{'below_model_deg':160.,'max_deg':.2})
+        self.assertTrue(h['segmented_motion']['enabled'])
+        self.assertFalse(policy['enabled'])
+        self.assertFalse(recovery_settings(h)['enabled'])
 
 
 class RecoveryIntegrationTests(unittest.TestCase):

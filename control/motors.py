@@ -19,6 +19,7 @@ from .trajectory import WaypointCursor, GoalQualification
 from .kinematics import PlanarArm
 from .recovery import SpeedRecovery, recovery_settings
 from .motion_policy import MotionRecovery, motion_policy_settings, angle_bias_profile
+from .segments import segment_settings, phase_profile
 
 from .protocol import (angle_from_reply, extract_frame, make_frame,
                        position_frame, state_from_reply)
@@ -57,8 +58,11 @@ class _MotionTrace:
                      "end_q_deg": [math.degrees(q) for q in points[-1][1]]}
         self.plan.update(waypoint_min_axis_step_deg=phase.get("waypoint_min_axis_step_deg"),
                          protected_micro_steps=phase.get("protected_micro_steps", []))
+        self.plan.update(segment_control=phase.get("segment_control"),
+                         segment_step_caps_deg=phase.get("segment_step_caps_deg"))
         self.actions = deque(maxlen=self.MAX_ACTIONS)
-        self.sent_actions = deque(maxlen=self.MAX_ACTIONS)
+        self.sent_actions = deque(maxlen=(min(16384, max(self.MAX_ACTIONS, len(points)*4))
+                                         if config.get("segmented_motion", {}).get("enabled") else self.MAX_ACTIONS))
         self.action_count = 0
         self.counts = {m["name"]: {"sent": 0, "skipped": 0, "send_failed": 0}
                        for m in motors}
@@ -342,6 +346,7 @@ class MotorPair:
         self.config = dict(self.DEFAULTS, **hardware_config)
         self.recovery_config = recovery_settings(self.config)
         self.motion_policy = motion_policy_settings(self.config)
+        self.segments = segment_settings(self.config)
         self.motors = [dict(m) for m in self.config["motors"]]
         if len(self.motors) != 2:
             raise ValueError("Exactly two motors are required")
@@ -664,6 +669,13 @@ class MotorPair:
         if not isinstance(points, list) or not points:
             raise ValueError("Phase requires a non-empty points list")
         result = []
+        segment_profile = phase_profile(self.segments, phase.get("phase")) if self.segments["enabled"] else None
+        speed_cap = self.config["max_speed_deg_s"] if segment_profile is None else segment_profile["speed_deg_s"]
+        step_caps = phase.get("segment_step_caps_deg") if segment_profile is not None else None
+        if step_caps is not None and (not isinstance(step_caps, list) or len(step_caps) != len(points)-1
+                or any(type(v) not in (int,float) or not math.isfinite(v)
+                       or not 0 < v <= segment_profile["max_step_deg"]+1e-9 for v in step_caps)):
+            raise ValueError("Invalid per-node segment step caps")
         for point in points:
             stamp = _finite(point["time_s"], "time_s")
             if len(point["q_rad"]) != 2:
@@ -683,8 +695,16 @@ class MotorPair:
                 dt = stamp - result[-1][0]
                 for motor, a, b in zip(self.motors, result[-1][1], angles):
                     velocity = abs(math.degrees(b - a)) * motor["ratio"] / dt
-                    if velocity > self.config["max_speed_deg_s"] + 1e-6:
+                    if velocity > speed_cap + 1e-6:
                         raise ValueError("Trajectory exceeds motor speed limit: " + motor["name"])
+                    if segment_profile is not None:
+                        step_cap = segment_profile["max_step_deg"] if step_caps is None else step_caps[len(result)-1]
+                        span = abs(math.degrees(b-a))
+                        wire_span = abs(round(self._motor_deg(motor, math.degrees(b))*100)
+                                        - round(self._motor_deg(motor, math.degrees(a))*100))
+                        if (span > step_cap+1e-7
+                                or wire_span > math.floor(step_cap*motor["ratio"]*100+1e-7)):
+                            raise ValueError("Segment exceeds phase angle step: " + motor["name"])
             result.append((stamp, angles))
         return result
 
@@ -799,7 +819,8 @@ class MotorPair:
                         external_retract=False, axis_min_speed_deg_s=None,
                         speed_tiers=None, command_speed_caps_deg_s=None,
                         recovery_bias_modes=None, recovery_validator=None, adaptive_mode=False,
-                        stuck_upshift_axes=None, stuck_angle_boost_axes=None, nominal_retry_axes=None, nominal_return_axes=None):
+                        stuck_upshift_axes=None, stuck_angle_boost_axes=None, nominal_retry_axes=None, nominal_return_axes=None,
+                        command_step_limit_deg=None, segment_origin_q_rad=None, segment_started_at=None):
         self._prepare_skip_reason = None
         motor, port = self.motors[i], self.ports[i]
         current = self._feedback[i]["motor_deg"]
@@ -1011,9 +1032,14 @@ class MotorPair:
                     "target_motor_deg": target/100, "feedback_motor_deg": current})
             return None
         direction = 0 if delta > 0 else 1
-        # Use same_dir_uncertainty when continuing in the same direction
-        # only after confirmed stillness; first sends and reversals use the full budget.
-        if (last_key is not None and direction == last_key[1]) or (last_key is None and stationary_confirmed):
+        stationary_segment_reversal = bool(command_step_limit_deg is not None
+            and stationary_confirmed and last_key is not None
+            and abs(current-last_key[0]/100) <= tolerance_motor_deg+.015*motor["ratio"]+1e-9)
+        # A reached route corner can reverse after sustained stationary
+        # feedback; it need not resolve a 0.2-degree turn at sub-wire precision.
+        # Moving reversals retain the full direction uncertainty budget.
+        if ((last_key is not None and direction == last_key[1])
+                or (last_key is None and stationary_confirmed) or stationary_segment_reversal):
             uncertainty = same_dir_uncertainty
         else:
             uncertainty = moving_uncertainty
@@ -1075,6 +1101,15 @@ class MotorPair:
             "speed_feedback_age_s": (None if self._feedback[i].get("speed_stamp") is None
                                      else decision_at - self._feedback[i]["speed_stamp"]),
         }
+        if command_step_limit_deg is not None:
+            previous_target = (last_key[0] if last_key is not None
+                and self._last_target_sent_at[i] >= segment_started_at else
+                round(self._motor_deg(motor, math.degrees(segment_origin_q_rad[i]))*100))
+            if abs(target-previous_target) > math.floor(command_step_limit_deg*motor["ratio"]*100+1e-7):
+                if trace is not None:
+                    trace.record_action({**event, "status": "skipped", "reason": "segment_command_step_exceeds_limit",
+                                         "previous_target_motor_deg": previous_target/100})
+                return None
         if nominal_return and not stationary_nominal_return:
             if trace is not None:
                 trace.record_action({**event, "status": "skipped",
@@ -1234,10 +1269,14 @@ class MotorPair:
         self._active_axes = [True, True]
         self._motion_trace = trace
         state = target = elapsed = progress_at = progress_q = None
-        adaptive = self.motion_policy["enabled"]
+        segmented = self.segments["enabled"]
+        segment_profile = phase_profile(self.segments, phase.get("phase")) if segmented else None
+        adaptive = self.motion_policy["enabled"] and not segmented
         recovery = (MotionRecovery(self.recovery_config, self.motors, phase.get("phase"), self.motion_policy,
                         (self.config["min_speed_deg_s"],self.config["max_speed_deg_s"],self.config["still_speed_deg_s"]))
-                    if adaptive else SpeedRecovery(self.recovery_config, self.motors, phase.get("phase")))
+                    if adaptive else SpeedRecovery(
+                        {**self.recovery_config, "enabled": False, "settling_enabled": False} if segmented else self.recovery_config,
+                        self.motors, phase.get("phase")))
         sent_count = 0
         try:
             state = self._read_state()
@@ -1260,10 +1299,12 @@ class MotorPair:
                                           self.config["goal_hold_s"], self.config["stable_s"],
                                           active_axes=self._active_axes)
             started = time.monotonic()
+            segment_caps = phase.get("segment_step_caps_deg") if segmented else None
             trace.started = started
             target = cursor.target()
             elapsed = cursor.elapsed
             progress_at, progress_q = [started, started], list(state["q_rad"])
+            segment_progress_at, segment_progress_q = started, list(state["q_rad"])
             passive_anchor = list(state["q_rad"])
             last_command = last_feedback = last_passive = started-10
             stage, stage_started = "tracking", started
@@ -1271,11 +1312,11 @@ class MotorPair:
             total_deadline = (started + points[-1][0] + self.config["move_timeout_margin_s"]
                               + len(points)*(self.recovery_config["total_recovery_s"] if adaptive
                                              else self.config["no_progress_s"]))
-            cart_meta = phase.get("cartesian_compensation")
+            cart_meta = None if segmented else phase.get("cartesian_compensation")
             # The adaptive policy uses independent temporary joint targets.
             # Keep line metadata for nominal planning and face checks only.
             # Legacy non-adaptive execution retains its historical line mode.
-            meta = None if adaptive else cart_meta
+            meta = None if adaptive or segmented else cart_meta
             cart_arm = None
             if cart_meta is not None:
                 if phase.get("phase") not in ("push", "push_correction", "approach", "withdraw") or cart_meta.get("allow_endpoint_extension"):
@@ -1351,7 +1392,8 @@ class MotorPair:
                     "active_command_acknowledged": list(self._last_target_acked),
                     "settling_bias_deg": [b/100 for b in self._settling_bias_centi],
                     "settling_bias_retracted": list(self._settling_bias_retracted),
-                    "bias_policy": "independent_axis_error_boost" if adaptive else "legacy",
+                    "bias_policy": "disabled" if segmented else ("independent_axis_error_boost" if adaptive else "legacy"),
+                    "segment_control": segment_profile,
                     "cartesian_bias_lead_mm": cart_lead,
                     "cartesian_bias_retracted": cart_retracted,
                     "cartesian_command_pending": pending_cart is not None,
@@ -1398,8 +1440,27 @@ class MotorPair:
                             self.motors[i], math.degrees(cursor.target()[i])))
                         <= .85*point_tols[i]*self.motors[i]["ratio"]+1e-9)
                     for i in active_indices)
+                # Small nodes must not be skipped merely because the final
+                # 0.3-degree acceptance band already covers their neighbours.
+                segment_written = True
+                if segmented and cursor.index > 0:
+                    incoming = [abs(q-p) for q, p in zip(cursor.target(), points[cursor.index-1][1])]
+                    dominant = max(active_indices, key=lambda i: incoming[i])
+                    key = self._last_targets[dominant]
+                    nominal = round(self._motor_deg(self.motors[dominant], math.degrees(cursor.target()[dominant]))*100)
+                    segment_written = (key is not None and key[0] == nominal
+                                       and self._last_target_sent_at[dominant] >= started)
+                    if not cursor.at_endpoint:
+                        for i in active_indices:
+                            key = self._last_targets[i]
+                            previous = (key[0] if key is not None and self._last_target_sent_at[i] >= started else round(self._motor_deg(
+                                self.motors[i], math.degrees(points[0][1][i]))*100))
+                            upcoming = round(self._motor_deg(self.motors[i], math.degrees(points[cursor.index+1][1][i]))*100)
+                            upcoming_cap = segment_profile["max_step_deg"] if segment_caps is None else segment_caps[cursor.index]
+                            if abs(upcoming-previous) > math.floor(upcoming_cap*self.motors[i]["ratio"]*100+1e-7):
+                                segment_written = False
                 changed = (cursor.advance(now, state["q_rad"], state["axis_stamp_monotonic_s"])
-                           if bias_recovered and pending_cart is None and (not adaptive or recovery.node_ready()) else False)
+                           if segment_written and bias_recovered and pending_cart is None and (not adaptive or recovery.node_ready()) else False)
                 target, elapsed = cursor.target(), cursor.elapsed
                 if changed:
                     recovery.node_changed(now, cursor.index) if adaptive else recovery.node_changed(now)
@@ -1409,6 +1470,12 @@ class MotorPair:
                     cart_retracted = False
                     pending_cart = None
                     progress_at, progress_q = [now, now], list(state["q_rad"])
+                    segment_progress_at, segment_progress_q = now, list(state["q_rad"])
+                if segmented:
+                    if max(abs(math.degrees(a-b)) for a, b in zip(state["q_rad"], segment_progress_q)) >= self.config["progress_deg"]-1e-9:
+                        segment_progress_at, segment_progress_q = now, list(state["q_rad"])
+                    if not segment_written and now-segment_progress_at >= self.config["no_progress_s"]:
+                        raise HardwareError("motion_no_progress", {"reason": "segment_command_not_ready", "waypoint_index": cursor.index})
                 recovery.select_directions(cursor.planned_directions(), now)
                 if cursor.at_endpoint and endpoint_at is None:
                     endpoint_at = now
@@ -1438,7 +1505,7 @@ class MotorPair:
                         qualifier.reset_after_command()
                         holding_at = None
                         stage, stage_started = "settling", now
-                else:
+                elif not segmented:
                     if not qualifier.armed:
                         for i in active_indices:
                             if (errors[i] > tolerances[i]+1e-9
@@ -1496,12 +1563,15 @@ class MotorPair:
                             raise HardwareError("cartesian_bias_out_of_limits")
                 if now-last_command >= 1/self.config["command_rate_hz"] and not qualifier.armed:
                     speed_floors, speed_tiers, speed_caps = recovery.profiles(self.config["max_speed_deg_s"])
+                    if segmented:
+                        speed_floors = speed_caps = [segment_profile["speed_deg_s"]]*2
+                        speed_tiers = [0, 0]
                     previous_writes = list(self._last_target_sent_at)
                     written = self._send_targets(command, planned_directions=cursor.planned_directions(),
                         planned_velocities=cursor.planned_velocities(), at_endpoint=cursor.at_endpoint,
-                        axis_at_endpoint=self._active_axes, coalesce_steps=True,
+                        axis_at_endpoint=(None if segmented else self._active_axes), coalesce_steps=not segmented,
                         tolerances_deg=tolerances, command_axes=self._active_axes,
-                        allow_bias_axes=([False, False] if meta is not None else
+                        allow_bias_axes=([False, False] if segmented or meta is not None else
                             [not adaptive and stalled[i] and not recovery.eligible(i) for i in range(2)]),
                         adaptive_mode=adaptive,
                         stuck_upshift_axes=[bool(adaptive and request is not None
@@ -1516,7 +1586,11 @@ class MotorPair:
                         recovery_validator=recovery_angle_safe,
                         axis_min_speed_deg_s=speed_floors, speed_tiers=speed_tiers,
                         command_speed_caps_deg_s=speed_caps,
-                        nominal_q_rad=(target if meta is not None else None),
+                        command_step_limit_deg=((segment_profile["max_step_deg"] if not segment_caps
+                                                 else segment_caps[max(0,cursor.index-1)]) if segmented else None),
+                        segment_origin_q_rad=(points[0][1] if segmented else None),
+                        segment_started_at=(started if segmented else None),
+                        nominal_q_rad=(target if segmented or meta is not None else None),
                         external_force=(meta is not None and (new_lead != cart_lead or external_retract)),
                         external_retract=external_retract)
                     sent_count += written

@@ -54,7 +54,7 @@
     ],
     "command_rate_hz": 50.0,
     "feedback_rate_hz": 20.0,
-    "max_speed_deg_s": 18.0,
+    "max_speed_deg_s": 60.0,
     "feedback_timeout_s": 0.5,
     "move_timeout_margin_s": 5.0,
     "angle_tolerance_deg": 0.3,
@@ -68,10 +68,6 @@
     "inactive_drift_deg": 1.0,
     "coalesce_step_deg": 0.45,
     "coalesce_wait_s": 0.45,
-    "settling_bias_wait_s": 0.45,
-    "settling_bias_max_deg": 0.6,
-    "settling_bias_step_deg": 0.2,
-    "settling_bias_trigger_margin_deg": 0.01,
     "min_speed_deg_s": 2.0,
     "speed_feedforward_gain": 1.15,
     "speed_error_gain_s": 2.5,
@@ -80,65 +76,20 @@
     "tracking_lead_deg": 1.8,
     "tracking_abort_deg": 3.5,
     "speed_recovery": {
-      "enabled": true,
-      "axes": [
-        "upper"
-      ],
-      "phases": [
-        "free"
-      ],
-      "directions": [
-        -1
-      ],
-      "speed_steps_deg_s": [
-        18.0,
-        30.0,
-        60.0,
-        90.0
-      ],
-      "trigger_s": 0.5,
-      "observe_s": 0.5,
-      "total_recovery_s": 24.0,
-      "max_upshifts": 4,
-      "max_no_gain_windows": 2,
-      "settling_enabled": true,
-      "settling_speed_deg_s": 18.0,
-      "settling_safe_distance_deg": 0.1,
-      "oscillation_window_s": 1.2,
-      "oscillation_amplitude_deg": 0.12,
-      "oscillation_reversal_deg": 0.04,
-      "oscillation_reversals": 3,
-      "near_goal_limit_deg": 1.0
+      "enabled": false
     },
     "motion_recovery": {
+      "enabled": false
+    },
+    "segmented_motion": {
       "enabled": true,
-      "max_downshifts": 2,
-      "max_angle_changes": 3,
-      "angle_step_deg": 0.2,
-      "angle_max_deg": 1.2,
-      "downshift_steps_deg_s": [
-        2.0,
-        6.0,
-        18.0,
-        30.0
-      ],
-      "angle_steps_deg": [
-        0.2,
-        0.6,
-        1.2
-      ],
-      "final_speed_deg_s": 90.0,
-      "max_recovery_rounds": 3,
-      "overshoot_return_enabled": true,
-      "overshoot_return_speed_deg_s": 18.0,
-      "bias_retraction_speed_deg_s": 18.0,
-      "bias_retraction_requires_crossing": true,
-      "axis_angle_bias": {
-        "upper": {
-          "below_model_deg": 160.0,
-          "max_deg": 0.2
-        }
-      }
+      "free_speed_deg_s": 10.0,
+      "push_speed_deg_s": 60.0,
+      "free_max_step_deg": 0.2,
+      "push_initial_step_deg": 0.2,
+      "push_step_increment_deg": 0.2,
+      "push_points_per_step": 3,
+      "push_max_step_deg": 1.0
     }
   },
   "verification": {

@@ -80,9 +80,10 @@ class WaypointRoundsTests(unittest.TestCase):
         started=[(e['waypoint_index'],e['recovery_round']) for e in r['events'] if e['event']=='node_recovery_round_started']
         self.assertEqual(started,[(1,1),(1,2),(2,1),(2,2)])
         self.assertEqual(d.unsafe_directions,[])
-    def test_production_has_three_rounds(self):
+    def test_three_round_setting_remains_valid_for_legacy_policy(self):
         c=json.loads((Path(__file__).resolve().parents[1]/'config/robot.json').read_text())
-        self.assertEqual(c['hardware']['motion_recovery']['max_recovery_rounds'],3)
+        c['hardware']['motion_recovery']['max_recovery_rounds']=3
+        self.assertEqual(policy_module.motion_policy_settings(c['hardware'])['max_recovery_rounds'],3)
         for n in (0,4,True):
             c['hardware']['motion_recovery']['max_recovery_rounds']=n
             with self.assertRaises(ValueError):policy_module.motion_policy_settings(c['hardware'])
