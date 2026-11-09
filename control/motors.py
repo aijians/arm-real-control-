@@ -18,7 +18,7 @@ import time
 from .trajectory import WaypointCursor, GoalQualification
 from .kinematics import PlanarArm
 from .recovery import SpeedRecovery, recovery_settings
-from .motion_policy import MotionRecovery, motion_policy_settings
+from .motion_policy import MotionRecovery, motion_policy_settings, angle_bias_profile
 
 from .protocol import (angle_from_reply, extract_frame, make_frame,
                        position_frame, state_from_reply)
@@ -449,6 +449,11 @@ class MotorPair:
                 for i in selected:
                     motor, port = self.motors[i], self.ports[i]
                     if command == 0x94:
+                        # Timestamp the query after the mandatory inter-frame
+                        # wait, so queue time is not counted twice at A6 send.
+                        delay = getattr(port, "_next_send_at", 0.)-time.monotonic()
+                        if delay > 0:
+                            time.sleep(delay)
                         self._pending_angle_query_at[i] = time.monotonic()
                     port.send(make_frame(command, motor["id"]))
                     if self._motion_trace is not None:
@@ -694,384 +699,489 @@ class MotorPair:
                 <= 0.85 * self.config["angle_tolerance_deg"] * m["ratio"] + 1e-9
                 for m, key, q in zip(self.motors, self._last_targets, q_rad)]
 
-    def _send_targets(self, q_rad, planned_directions=None, at_endpoint=False,
-                      axis_at_endpoint=None, coalesce_steps=False,
-                      tolerances_deg=None, allow_bias_axes=None, command_axes=None,
-                      planned_velocities=None, nominal_q_rad=None, external_force=False,
-                      external_retract=False, axis_min_speed_deg_s=None,
-                      speed_tiers=None, command_speed_caps_deg_s=None,
-                      recovery_bias_modes=None, recovery_validator=None, adaptive_mode=False,
-                      stuck_upshift_axes=None, stuck_angle_boost_axes=None, nominal_retry_axes=None, nominal_return_axes=None):
+    def _send_targets(self, q_rad, **options):
         sent = 0
+        validator = options.get("recovery_validator")
+        command_axes = options.get("command_axes")
         with self._io_lock:
             if self._halt_event.is_set():
                 raise HardwareError("motion_halted")
-            for i, (motor, port, q) in enumerate(zip(self.motors, self.ports, q_rad)):
+            for i, q in enumerate(q_rad):
                 if command_axes is not None and not command_axes[i]:
                     continue
-                current = self._feedback[i]["motor_deg"]
-                nominal_q = q if nominal_q_rad is None else nominal_q_rad[i]
-                nominal_motor_deg = self._motor_deg(motor, math.degrees(nominal_q))
-                command_motor_deg = self._motor_deg(motor, math.degrees(q))
-                nominal_target = round(nominal_motor_deg * 100)
-                nominal_delta = nominal_motor_deg - current
-                axis_end = bool(at_endpoint or (axis_at_endpoint is not None
-                                                and i < len(axis_at_endpoint)
-                                                and axis_at_endpoint[i]))
-                if not axis_end:
-                    self._settling_bias_centi[i] = 0
-                    self._settling_bias_retracted[i] = False
-                decision_at = time.monotonic()
-                age = max(0, decision_at - self._feedback[i]["angle_stamp"])
-                query_stamp = self._feedback[i].get("angle_query_stamp",
-                                                    self._feedback[i]["angle_stamp"])
-                query_age = max(age, max(0.0, decision_at - query_stamp))
-                send_delay = max(0.0, getattr(port, "_next_send_at", 0.0) - decision_at)
-                measured_speed = abs(self._feedback[i].get("speed_deg_s") or 0.0)
-                still_motor_speed = self.config["still_speed_deg_s"] * motor["ratio"]
-                tolerance_motor_deg = (self.config["angle_tolerance_deg"] if tolerances_deg is None
-                                       else tolerances_deg[i]) * motor["ratio"]
-                lead_motor_deg = self.config["tracking_lead_deg"] * motor["ratio"]
-                abort_motor_deg = self.config["tracking_abort_deg"] * motor["ratio"]
-                last_key = self._last_targets[i]
-                speed_tier = 0 if speed_tiers is None else speed_tiers[i]
-                if type(speed_tier) is not int or not -4 <= speed_tier <= 4:
-                    raise ValueError("invalid discrete speed_tier")
-                speed_floor = 0. if axis_min_speed_deg_s is None else axis_min_speed_deg_s[i]
-                command_cap = (self.config["max_speed_deg_s"] if command_speed_caps_deg_s is None
-                               else command_speed_caps_deg_s[i])
-                if not 0 <= speed_floor <= command_cap <= 360:
-                    raise ValueError("invalid A6 recovery speed limits")
-                previous_tier = 0 if last_key is None or len(last_key) < 4 else last_key[3]
-                tier_changed = last_key is not None and previous_tier != speed_tier
-
-                # A single zero-speed sample (especially one preceding the last
-                # A6) is not proof that a newly commanded joint has stopped.
-                speed_stamp = self._feedback[i].get("speed_stamp", 0.0)
-                sample_stamp = min(self._feedback[i]["angle_stamp"], speed_stamp)
-                fresh_stationary = (
-                    sample_stamp >= self._last_target_sent_at[i]
-                    and max(age, decision_at - speed_stamp) <= self.config["feedback_timeout_s"]
-                    and measured_speed <= still_motor_speed)
-                probe = self._stationary_probe[i]
-                if not fresh_stationary:
-                    self._stationary_probe[i] = None
-                elif (probe is None or sample_stamp < probe[0]
-                      or abs(current-probe[1]) > still_motor_speed * max(0., sample_stamp-probe[0]) + 0.015):
-                    self._stationary_probe[i] = (sample_stamp, current)
-                probe = self._stationary_probe[i]
-                stationary_confirmed = (fresh_stationary and probe is not None
-                                        and sample_stamp-probe[0] >= 0.10 - 1e-9)
-                wire_time = 14 * 10 / self.config["baudrate"]
-                stationary_uncertainty = (
-                    still_motor_speed * (query_age + send_delay + wire_time) + 0.015
-                )
-                moving_uncertainty = (
-                    max(self.config["max_speed_deg_s"], command_cap,
-                        0. if last_key is None else last_key[2]/100., measured_speed)
-                    * (query_age + send_delay + wire_time) + 0.015
-                )
-                same_dir_uncertainty = (
-                    stationary_uncertainty if stationary_confirmed
-                    else moving_uncertainty
-                )
-
-                retract_latch_centi = None
-                pending_bias = self._settling_bias_centi[i]
-                pending_retracted = self._settling_bias_retracted[i]
-                active_in_band = (last_key is not None and
-                    abs(last_key[0] / 100 - nominal_motor_deg) <= .85 * tolerance_motor_deg + 1e-9)
-                latch_locked = axis_end and pending_retracted and active_in_band
-                if (not adaptive_mode and axis_end and nominal_q_rad is None
-                        and last_key is not None and not latch_locked):
-                    max_hold_offset_centi = max(1, round(0.45 * tolerance_motor_deg * 100))
-                    active_offset_deg = abs(last_key[0] / 100 - nominal_motor_deg)
-                    approaching_band = (
-                        pending_bias != 0 and nominal_delta * pending_bias > 0
-                        and ((measured_speed > still_motor_speed
-                              and abs(nominal_delta) <= tolerance_motor_deg + .25 * motor["ratio"])
-                             or abs(nominal_delta) <= tolerance_motor_deg + 1e-9))
-                    in_band_with_overdrive = (
-                        abs(nominal_delta) <= tolerance_motor_deg + 1e-9
-                        and active_offset_deg > .45 * tolerance_motor_deg + 1e-9)
-                    if approaching_band or in_band_with_overdrive:
-                        step_sign = 1 if last_key[1] == 0 else -1
-                        min_ahead_centi = round(current * 100) + step_sign * max(
-                            3, math.ceil((same_dir_uncertainty + .02) * 100))
-                        ideal = nominal_target + step_sign * min(
-                            max_hold_offset_centi, round(.12 * motor["ratio"] * 100))
-                        low = math.ceil((nominal_motor_deg - .85 * tolerance_motor_deg) * 100 - 1e-9)
-                        high = math.floor((nominal_motor_deg + .85 * tolerance_motor_deg) * 100 + 1e-9)
-                        if low <= high:
-                            candidate = (max(ideal, min_ahead_centi) if step_sign > 0
-                                         else min(ideal, min_ahead_centi))
-                            candidate = self._clamp_motor_centi(motor, max(low, min(high, candidate)))
-                            candidate_delta = candidate / 100 - current
-                            # Clipping into the band must never silently reverse
-                            # the A6 direction or consume its uncertainty margin.
-                            if (step_sign * candidate_delta > same_dir_uncertainty + 1e-9
-                                    and abs(candidate / 100 - nominal_motor_deg) <= .85 * tolerance_motor_deg + 1e-9
-                                    and abs(candidate / 100 - nominal_motor_deg) < active_offset_deg):
-                                retract_latch_centi = candidate
-                                pending_bias = candidate - nominal_target
-                                pending_retracted = True
-                    elif (not pending_retracted and stationary_confirmed
-                          and allow_bias_axes is not None and allow_bias_axes[i]
-                          and decision_at - self._last_target_sent_at[i] >= self.config["settling_bias_wait_s"]
-                          and tolerance_motor_deg + self.config["settling_bias_trigger_margin_deg"] * motor["ratio"] < abs(nominal_delta) < abort_motor_deg):
-                        cap = round(self.config["settling_bias_max_deg"] * motor["ratio"] * 100)
-                        step = max(1, round(self.config["settling_bias_step_deg"] * motor["ratio"] * 100))
-                        sign = 1 if nominal_delta > 0 else -1
-                        if pending_bias * sign < 0:
-                            pending_bias = 0  # Remove old bias before any reverse boost.
-                        else:
-                            pending_bias = sign * min(cap, abs(pending_bias) + step)
-
-                # Explicit angle stage follows exhausted speed adjustments;
-                # it cannot run on the old elapsed-time bias trigger.
-                bias_mode = 0 if recovery_bias_modes is None else recovery_bias_modes[i]
-                # A temporary drive target must be recalled against the ORIGINAL
-                # node, independently of the healthy joint. Recall early while
-                # approaching its band, or whenever it has crossed that node.
-                old_bias = self._settling_bias_centi[i]
-                nominal_return = bool(nominal_return_axes is not None and nominal_return_axes[i])
-                axis_bias_retraction = bool(adaptive_mode and nominal_q_rad is None
-                    and old_bias and (nominal_return or bias_mode == -2 or abs(nominal_delta) <= tolerance_motor_deg + 1e-9
-                        or nominal_delta * old_bias <= 0
-                        or (measured_speed > still_motor_speed
-                            and abs(nominal_delta) <= tolerance_motor_deg + .25*motor["ratio"])))
-                if bias_mode in (-1, 1) and nominal_q_rad is None and not axis_bias_retraction:
-                    step = self.motion_policy["angle_step_deg"] * motor["ratio"]
-                    cap = self.motion_policy["angle_max_deg"] * motor["ratio"]
-                    levels = self.motion_policy['angle_steps_deg']
-                    magnitude = abs(self._settling_bias_centi[i])/100
-                    if bias_mode > 0:
-                        sign = 1 if nominal_delta > 0 else -1
-                        next_bias = (next((v*motor['ratio'] for v in levels
-                            if v*motor['ratio'] > magnitude+.005), cap) if levels else magnitude+step)
-                        desired_bias = sign * min(cap, next_bias)
-                    elif self._settling_bias_centi[i]:
-                        old_bias = self._settling_bias_centi[i]/100
-                        smaller = (max((v*motor['ratio'] for v in levels
-                            if v*motor['ratio'] < magnitude-.005), default=0.) if levels else max(0., magnitude-step))
-                        desired_bias = math.copysign(smaller, old_bias)
-                    else:
-                        desired_bias = math.copysign(min(step, .5*abs(nominal_delta)), -nominal_delta)
-                    pending_bias = round(desired_bias*100)
-                    pending_retracted = False
-                    retract_latch_centi = None
-                    latch_locked = False
-                if axis_bias_retraction or nominal_return:
-                    pending_bias = 0
-                    pending_retracted = True
-                    retract_latch_centi = nominal_target
-                    latch_locked = False
-                if nominal_q_rad is not None:
-                    target = self._clamp_motor_centi(motor, round(command_motor_deg * 100))
-                    pending_bias = target - nominal_target
-                    pending_retracted = external_retract
-                elif latch_locked:
-                    target = last_key[0]
-                elif retract_latch_centi is not None:
-                    target = retract_latch_centi
-                else:
-                    target = self._clamp_motor_centi(
-                        motor, nominal_target + (pending_bias if axis_end else 0))
-                if adaptive_mode and nominal_q_rad is None:
-                    # Record the bounded target actually sent, not an unclipped
-                    # requested offset. Subsequent .2-degree steps start here.
-                    pending_bias = target - nominal_target
-                if (adaptive_mode and (target != nominal_target or axis_bias_retraction or nominal_return)
-                        and (last_key is None or target != last_key[0] or nominal_return)
-                        and (recovery_validator is None or not recovery_validator(i, target))):
-                    if self._motion_trace is not None:
-                        self._motion_trace.record_action({"motor": motor["name"], "status": "skipped",
-                            "reason": "uncertified_recovery_angle_change", "target_motor_deg": target/100})
+                selection_at = time.monotonic()
+                candidate = self._prepare_target(i, q, **options)
+                if (candidate is None and self._opened
+                        and self._prepare_skip_reason == "within_direction_uncertainty"
+                        and not self._send_feedback_fresh(i)):
+                    self._request_feedback(axes=[i], include_speed=False)
+                    self._pump(.003)
+                    self._snapshot()
+                    candidate = self._prepare_target(i, q, **options)
+                if candidate is None:
                     continue
-                delta = target / 100 - current
-                direction = 0 if delta > 0 else 1
-                # Use same_dir_uncertainty when continuing in the same direction
-                # only after confirmed stillness; first sends and reversals use the full budget.
-                if (last_key is not None and direction == last_key[1]) or (last_key is None and stationary_confirmed):
-                    uncertainty = same_dir_uncertainty
-                else:
-                    uncertainty = moving_uncertainty
-
-                # A diagnosed stall with fresh, sustained stationary feedback
-                # can resend the *same* target and direction at a higher tier.
-                # The new cap is not evidence of motion before that write.
-                stationary_stuck_upshift = (
-                    stuck_upshift_axes is not None and stuck_upshift_axes[i]
-                    and tier_changed and speed_tier > 0 and last_key is not None
-                    and target == last_key[0] and direction == last_key[1]
-                    and speed_floor > last_key[2]/100. + .005
-                    and stationary_confirmed)
-                # All other tier changes, reversals and angle adjustments keep
-                # the original moving-direction uncertainty budget.
-                if (tier_changed or (adaptive_mode and (target != nominal_target
-                        or (last_key is not None and last_key[0] != nominal_target)))):
-                    uncertainty = max(uncertainty, moving_uncertainty)
-                stationary_stuck_angle_boost = bool(
-                    adaptive_mode and stuck_angle_boost_axes is not None
-                    and stuck_angle_boost_axes[i] and not axis_bias_retraction
-                    and stationary_confirmed and last_key is not None
-                    and direction == last_key[1] and target != last_key[0]
-                    and abs(pending_bias) > abs(old_bias)
-                    and (target-last_key[0])*(1 if direction == 0 else -1) > 0)
-                stationary_bias_retraction = bool(axis_bias_retraction and stationary_confirmed)
-                nominal_retry = bool(nominal_retry_axes is not None and nominal_retry_axes[i])
-                stationary_nominal_retry = bool(nominal_retry and stationary_confirmed
-                    and last_key is not None and target == nominal_target
-                    and direction == last_key[1] and pending_bias == 0)
-                stationary_nominal_return = bool(nominal_return and stationary_confirmed
-                    and last_key is not None and target == nominal_target and pending_bias == 0
-                    and abs(nominal_delta) > tolerance_motor_deg+1e-9)
-                if (stationary_stuck_upshift or stationary_stuck_angle_boost
-                        or stationary_bias_retraction or stationary_nominal_retry or stationary_nominal_return):
-                    uncertainty = stationary_uncertainty
+                if candidate["needs_validation"]:
+                    safe = False if validator is None else validator(i, candidate["target"])
+                    if safe is not True:
+                        self._target_skip(candidate, "recovery_geometry_pending" if safe is None
+                                          else "uncertified_recovery_angle_change")
+                        continue
+                # Re-read after certification, then rerun ALL cheap conditions,
+                # including retraction selection, direction, uncertainty and dedup.
+                if self._opened:
+                    self._pump(0)
+                    self._snapshot()
+                    if not self._send_feedback_fresh(i):
+                        self._request_feedback(axes=[i], include_speed=False)
+                        self._pump(.003)
+                        self._snapshot()
+                    if not self._send_feedback_fresh(i):
+                        self._target_skip(candidate, "send_feedback_not_fresh")
+                        continue
+                candidate = self._prepare_target(i, q, **options)
+                if candidate is None:
+                    continue
+                if candidate["needs_validation"]:
+                    # Production validator only looks up certificates here;
+                    # a changed envelope is deferred to the next feedback loop.
+                    safe = (validator.contains(i, candidate["target"])
+                            if hasattr(validator, "contains") else
+                            False if validator is None else validator(i, candidate["target"]))
+                    if safe is not True:
+                        self._target_skip(candidate, "recovery_geometry_changed_after_refresh")
+                        continue
+                if self._opened and not self._send_feedback_fresh(i):
+                    self._target_skip(candidate, "send_feedback_not_fresh")
+                    continue
+                motor, port = self.motors[i], self.ports[i]
+                wire, key = candidate["wire"], candidate["key"]
+                event = candidate["event"]
+                if event is not None:
+                    event["selection_started_monotonic_s"] = selection_at
                 trace = self._motion_trace
-                event = None if trace is None else {
-                    "motor": motor["name"], "device": motor["device"],
-                    "decision_monotonic_s": decision_at,
-                    "reference_q_deg": math.degrees(q), "target_motor_deg": target / 100,
-                    "nominal_target_motor_deg": nominal_motor_deg,
-                    "nominal_delta_motor_deg": nominal_delta,
-                    "stationary_direction_confirmed": stationary_confirmed,
-                    "retraction_pending": retract_latch_centi is not None,
-                    "settling_bias_motor_deg": (target - nominal_target) / 100,
-                    "feedback_motor_deg": current, "delta_motor_deg": delta,
-                    "feedback_speed_motor_deg_s": self._feedback[i].get("speed_deg_s"),
-                    "speed_tier": speed_tier, "previous_speed_tier": previous_tier,
-                    "axis_min_speed_deg_s": speed_floor, "command_speed_cap_deg_s": command_cap,
-                    "angle_feedback_age_s": age, "direction_uncertainty_deg": uncertainty,
-                    "stationary_stuck_upshift": bool(stationary_stuck_upshift),
-                    "stationary_stuck_angle_boost": stationary_stuck_angle_boost,
-                    "axis_bias_retraction": axis_bias_retraction,
-                    "stationary_bias_retraction": stationary_bias_retraction,
-                    "stationary_nominal_retry": stationary_nominal_retry,
-                    "stationary_nominal_return": stationary_nominal_return,
-                    "speed_feedback_age_s": (None if self._feedback[i].get("speed_stamp") is None
-                                             else decision_at - self._feedback[i]["speed_stamp"]),
-                }
-                if nominal_return and not stationary_nominal_return:
-                    if trace is not None:
-                        trace.record_action({**event, "status": "skipped",
-                                             "reason": "waiting_stationary_nominal_return"})
-                    continue
-                if nominal_retry and not stationary_nominal_retry:
-                    if trace is not None:
-                        trace.record_action({**event, "status": "skipped",
-                                             "reason": "waiting_stationary_nominal_retry"})
-                    continue
-                settling_change = speed_tier < 0 and tier_changed and not stationary_nominal_return
-                if settling_change and ((not at_endpoint and not adaptive_mode) or last_key is None
-                        or target != last_key[0] or direction != last_key[1]
-                        or not stationary_confirmed
-                        or abs(delta) <= max(uncertainty,
-                            self.recovery_config["settling_safe_distance_deg"] * motor["ratio"])):
-                    if trace is not None:
-                        trace.record_action({**event, "status": "skipped",
-                                             "reason": "unsafe_settling_speed_change"})
-                    continue
-                if abs(delta) <= uncertainty or (
-                        axis_end and nominal_q_rad is None and retract_latch_centi is None
-                        and not settling_change
-                        and abs(nominal_delta) <= tolerance_motor_deg + 1e-9
-                        and last_key is not None):
-                    if trace is not None:
-                        trace.record_action({**event, "status": "skipped",
-                                             "reason": "within_direction_uncertainty"})
-                    continue
-                planned_sign = (0 if planned_directions is None or i >= len(planned_directions)
-                                else planned_directions[i])
-                planned_motor_dir = (None if planned_sign == 0
-                                     else (0 if motor["sign"] * planned_sign > 0 else 1))
-                # Prevent mid-trajectory reverse A6 commands when an axis slightly
-                # leads its interpolated reference along the planned motion direction.
-                if (not at_endpoint and planned_motor_dir is not None
-                        and not (stationary_bias_retraction or stationary_nominal_return) and direction != planned_motor_dir
-                        and (abs(delta) <= lead_motor_deg or measured_speed > still_motor_speed)):
-                    if trace is not None:
-                        trace.record_action({**event, "status": "skipped",
-                                             "reason": "within_direction_uncertainty"})
-                    continue
-                # On stationary segments or at the endpoint, never issue a reverse
-                # A6 correction while the motor is still decelerating or already
-                # within angle tolerance of the target.
-                if ((axis_end or (planned_directions is not None and planned_motor_dir is None))
-                        and not (stationary_bias_retraction or stationary_nominal_return)
-                        and last_key is not None and direction != last_key[1]
-                        and (abs(nominal_delta if axis_end else delta) <= tolerance_motor_deg
-                             or measured_speed > still_motor_speed)):
-                    if trace is not None:
-                        trace.record_action({**event, "status": "skipped",
-                                             "reason": "within_direction_uncertainty"})
-                    continue
-                velocity = (0.0 if planned_velocities is None else
-                            abs(math.degrees(planned_velocities[i])) * motor["ratio"])
-                desired_speed = (self.config["speed_feedforward_gain"] * velocity
-                                 + self.config["speed_error_gain_s"] * abs(delta))
-                # Continuous formula changes do not trigger retransmission.
-                # A latched recovery floor survives all nodes of this monotonic run.
-                base_speed = min(self.config["max_speed_deg_s"],
-                                 max(self.config["min_speed_deg_s"], desired_speed))
-                speed = max(1, round(min(command_cap, max(speed_floor, base_speed)) * 100))
-                wire = position_frame(motor["id"], direction, target, speed)
-                key = (target, direction, speed, speed_tier)
-                if last_key is not None and last_key[0] == target:
-                    # Only re-send an identical target if the previous 0xA6 reply
-                    # was never received (unacknowledged frame loss). Once acked,
-                    # repeating the exact same target every 500ms does not add torque.
-                    stalled_unacked = (
-                        direction == last_key[1]
-                        and not self._last_target_acked[i]
-                        and abs(nominal_delta if axis_end else delta) > max(uncertainty, tolerance_motor_deg)
-                        and measured_speed <= still_motor_speed
-                        and decision_at - self._last_target_sent_at[i] >= max(
-                            0.25, 5 / self.config["command_rate_hz"])
-                    )
-                    # Never turn a same-position resend into a new forced
-                    # A6 direction. Only a discrete tier transition may update
-                    # an acknowledged target once; raw speed rounding is ignored.
-                    same_direction_tier_change = tier_changed and direction == last_key[1]
-                    if ((direction != last_key[1] and not stationary_nominal_return)
-                            or not (stalled_unacked or same_direction_tier_change or stationary_nominal_retry or stationary_nominal_return)):
-                        if trace is not None:
-                            trace.record_action({**event, "status": "skipped",
-                                                 "reason": "unchanged_active_target"})
-                        continue
-                elif (coalesce_steps and not at_endpoint and retract_latch_centi is None
-                      and not external_force and pending_bias == self._settling_bias_centi[i]
-                      and last_key is not None
-                      and direction == last_key[1]):
-                    # Merge only temporarily; a changed target gets an exit.
-                    step_deg = abs(target - last_key[0]) / 100.0
-                    if (step_deg < self.config["coalesce_step_deg"] * motor["ratio"]
-                            and decision_at - self._last_target_sent_at[i] < self.config["coalesce_wait_s"]):
-                        if trace is not None:
-                            trace.record_action({**event, "status": "skipped", "reason": "coalesced_small_step"})
-                        continue
                 try:
                     port.send(wire, cancel_event=self._halt_event)
                 except BaseException as exc:
                     if trace is not None:
-                        trace.record_action({**event, "status": "send_failed", "direction": direction,
-                                             "frame_hex": wire.hex(" "), "error_type": type(exc).__name__,
-                                             "error": str(exc), "call_ended_monotonic_s": time.monotonic()})
+                        trace.record_action({**event, "status": "send_failed", "direction": key[1],
+                            "frame_hex": wire.hex(" "), "error_type": type(exc).__name__,
+                            "error": str(exc), "call_ended_monotonic_s": time.monotonic()})
                     raise
                 completed_at = time.monotonic()
-                self._settling_bias_centi[i] = pending_bias if axis_end else 0
-                self._settling_bias_retracted[i] = pending_retracted if axis_end else False
+                self._settling_bias_centi[i] = candidate["pending_bias"] if candidate["axis_end"] else 0
+                self._settling_bias_retracted[i] = candidate["pending_retracted"] if candidate["axis_end"] else False
                 self._stationary_probe[i] = None
                 self._last_targets[i] = key
                 self._last_target_sent_at[i] = completed_at
                 self._last_target_acked[i] = False
                 sent += 1
                 if trace is not None:
-                    trace.record_action({**event, "status": "sent", "direction": direction,
-                                         "frame_hex": wire.hex(" "),
-                                         "write_completed_monotonic_s": completed_at})
+                    trace.record_action({**event, "status": "sent", "direction": key[1],
+                        "frame_hex": wire.hex(" "), "write_completed_monotonic_s": completed_at})
         return sent
+
+    def _target_skip(self, candidate, reason):
+        if self._motion_trace is not None:
+            self._motion_trace.record_action({**candidate["event"], "status": "skipped", "reason": reason})
+
+    def _send_feedback_fresh(self, axis):
+        reply, port = self._feedback[axis], self.ports[axis]
+        now = time.monotonic()
+        stamps = (reply.get("angle_stamp", 0.), reply.get("angle_query_stamp", 0.))
+        queue_delay = max(0., getattr(port, "_next_send_at", 0.)-now)
+        return (now-min(stamps)+queue_delay+14*10/self.config["baudrate"] <= .010
+                and now-reply.get("speed_stamp", 0.) <= 1/self.config["feedback_rate_hz"])
+
+    def _prepare_target(self, i, q, planned_directions=None, at_endpoint=False,
+                        axis_at_endpoint=None, coalesce_steps=False,
+                        tolerances_deg=None, allow_bias_axes=None, command_axes=None,
+                        planned_velocities=None, nominal_q_rad=None, external_force=False,
+                        external_retract=False, axis_min_speed_deg_s=None,
+                        speed_tiers=None, command_speed_caps_deg_s=None,
+                        recovery_bias_modes=None, recovery_validator=None, adaptive_mode=False,
+                        stuck_upshift_axes=None, stuck_angle_boost_axes=None, nominal_retry_axes=None, nominal_return_axes=None):
+        self._prepare_skip_reason = None
+        motor, port = self.motors[i], self.ports[i]
+        current = self._feedback[i]["motor_deg"]
+        nominal_q = q if nominal_q_rad is None else nominal_q_rad[i]
+        nominal_motor_deg = self._motor_deg(motor, math.degrees(nominal_q))
+        command_motor_deg = self._motor_deg(motor, math.degrees(q))
+        nominal_target = round(nominal_motor_deg * 100)
+        nominal_delta = nominal_motor_deg - current
+        axis_end = bool(at_endpoint or (axis_at_endpoint is not None
+                                        and i < len(axis_at_endpoint)
+                                        and axis_at_endpoint[i]))
+        if not axis_end:
+            self._settling_bias_centi[i] = 0
+            self._settling_bias_retracted[i] = False
+        decision_at = time.monotonic()
+        age = max(0, decision_at - self._feedback[i]["angle_stamp"])
+        query_stamp = self._feedback[i].get("angle_query_stamp",
+                                            self._feedback[i]["angle_stamp"])
+        query_age = max(age, max(0.0, decision_at - query_stamp))
+        send_delay = max(0.0, getattr(port, "_next_send_at", 0.0) - decision_at)
+        measured_speed = abs(self._feedback[i].get("speed_deg_s") or 0.0)
+        still_motor_speed = self.config["still_speed_deg_s"] * motor["ratio"]
+        tolerance_motor_deg = (self.config["angle_tolerance_deg"] if tolerances_deg is None
+                               else tolerances_deg[i]) * motor["ratio"]
+        lead_motor_deg = self.config["tracking_lead_deg"] * motor["ratio"]
+        abort_motor_deg = self.config["tracking_abort_deg"] * motor["ratio"]
+        last_key = self._last_targets[i]
+        speed_tier = 0 if speed_tiers is None else speed_tiers[i]
+        if type(speed_tier) is not int or not -4 <= speed_tier <= 4:
+            raise ValueError("invalid discrete speed_tier")
+        speed_floor = 0. if axis_min_speed_deg_s is None else axis_min_speed_deg_s[i]
+        command_cap = (self.config["max_speed_deg_s"] if command_speed_caps_deg_s is None
+                       else command_speed_caps_deg_s[i])
+        if not 0 <= speed_floor <= command_cap <= 360:
+            raise ValueError("invalid A6 recovery speed limits")
+        previous_tier = 0 if last_key is None or len(last_key) < 4 else last_key[3]
+        tier_changed = last_key is not None and previous_tier != speed_tier
+
+        # A single zero-speed sample (especially one preceding the last
+        # A6) is not proof that a newly commanded joint has stopped.
+        speed_stamp = self._feedback[i].get("speed_stamp", 0.0)
+        sample_stamp = min(self._feedback[i]["angle_stamp"], speed_stamp)
+        fresh_stationary = (
+            sample_stamp >= self._last_target_sent_at[i]
+            and max(age, decision_at - speed_stamp) <= self.config["feedback_timeout_s"]
+            and measured_speed <= still_motor_speed)
+        probe = self._stationary_probe[i]
+        if not fresh_stationary:
+            self._stationary_probe[i] = None
+        elif (probe is None or sample_stamp < probe[0]
+              or abs(current-probe[1]) > still_motor_speed * max(0., sample_stamp-probe[0]) + 0.015):
+            self._stationary_probe[i] = (sample_stamp, current)
+        probe = self._stationary_probe[i]
+        stationary_confirmed = (fresh_stationary and probe is not None
+                                and sample_stamp-probe[0] >= 0.10 - 1e-9)
+        wire_time = 14 * 10 / self.config["baudrate"]
+        stationary_uncertainty = (
+            still_motor_speed * (query_age + send_delay + wire_time) + 0.015
+        )
+        moving_uncertainty = (
+            max(self.config["max_speed_deg_s"], command_cap,
+                0. if last_key is None else last_key[2]/100., measured_speed)
+            * (query_age + send_delay + wire_time) + 0.015
+        )
+        same_dir_uncertainty = (
+            stationary_uncertainty if stationary_confirmed
+            else moving_uncertainty
+        )
+
+        retract_latch_centi = None
+        pending_bias = self._settling_bias_centi[i]
+        pending_retracted = self._settling_bias_retracted[i]
+        active_in_band = (last_key is not None and
+            abs(last_key[0] / 100 - nominal_motor_deg) <= .85 * tolerance_motor_deg + 1e-9)
+        latch_locked = axis_end and pending_retracted and active_in_band
+        if (not adaptive_mode and axis_end and nominal_q_rad is None
+                and last_key is not None and not latch_locked):
+            max_hold_offset_centi = max(1, round(0.45 * tolerance_motor_deg * 100))
+            active_offset_deg = abs(last_key[0] / 100 - nominal_motor_deg)
+            approaching_band = (
+                pending_bias != 0 and nominal_delta * pending_bias > 0
+                and ((measured_speed > still_motor_speed
+                      and abs(nominal_delta) <= tolerance_motor_deg + .25 * motor["ratio"])
+                     or abs(nominal_delta) <= tolerance_motor_deg + 1e-9))
+            in_band_with_overdrive = (
+                abs(nominal_delta) <= tolerance_motor_deg + 1e-9
+                and active_offset_deg > .45 * tolerance_motor_deg + 1e-9)
+            if approaching_band or in_band_with_overdrive:
+                step_sign = 1 if last_key[1] == 0 else -1
+                min_ahead_centi = round(current * 100) + step_sign * max(
+                    3, math.ceil((same_dir_uncertainty + .02) * 100))
+                ideal = nominal_target + step_sign * min(
+                    max_hold_offset_centi, round(.12 * motor["ratio"] * 100))
+                low = math.ceil((nominal_motor_deg - .85 * tolerance_motor_deg) * 100 - 1e-9)
+                high = math.floor((nominal_motor_deg + .85 * tolerance_motor_deg) * 100 + 1e-9)
+                if low <= high:
+                    candidate = (max(ideal, min_ahead_centi) if step_sign > 0
+                                 else min(ideal, min_ahead_centi))
+                    candidate = self._clamp_motor_centi(motor, max(low, min(high, candidate)))
+                    candidate_delta = candidate / 100 - current
+                    # Clipping into the band must never silently reverse
+                    # the A6 direction or consume its uncertainty margin.
+                    if (step_sign * candidate_delta > same_dir_uncertainty + 1e-9
+                            and abs(candidate / 100 - nominal_motor_deg) <= .85 * tolerance_motor_deg + 1e-9
+                            and abs(candidate / 100 - nominal_motor_deg) < active_offset_deg):
+                        retract_latch_centi = candidate
+                        pending_bias = candidate - nominal_target
+                        pending_retracted = True
+            elif (not pending_retracted and stationary_confirmed
+                  and allow_bias_axes is not None and allow_bias_axes[i]
+                  and decision_at - self._last_target_sent_at[i] >= self.config["settling_bias_wait_s"]
+                  and tolerance_motor_deg + self.config["settling_bias_trigger_margin_deg"] * motor["ratio"] < abs(nominal_delta) < abort_motor_deg):
+                cap = round(self.config["settling_bias_max_deg"] * motor["ratio"] * 100)
+                step = max(1, round(self.config["settling_bias_step_deg"] * motor["ratio"] * 100))
+                sign = 1 if nominal_delta > 0 else -1
+                if pending_bias * sign < 0:
+                    pending_bias = 0  # Remove old bias before any reverse boost.
+                else:
+                    pending_bias = sign * min(cap, abs(pending_bias) + step)
+
+        # Explicit angle stage follows exhausted speed adjustments;
+        # it cannot run on the old elapsed-time bias trigger.
+        bias_mode = 0 if recovery_bias_modes is None else recovery_bias_modes[i]
+        # A temporary drive target must be recalled against the ORIGINAL
+        # node, independently of the healthy joint. Recall early while
+        # approaching its band, or whenever it has crossed that node.
+        old_bias = self._settling_bias_centi[i]
+        nominal_return = bool(nominal_return_axes is not None and nominal_return_axes[i])
+        axis_bias_retraction = bool(adaptive_mode and nominal_q_rad is None
+            and old_bias and (nominal_return or bias_mode == -2 or abs(nominal_delta) <= tolerance_motor_deg + 1e-9
+                or nominal_delta * old_bias <= 0
+                or (measured_speed > still_motor_speed
+                    and abs(nominal_delta) <= tolerance_motor_deg + .25*motor["ratio"])))
+        if axis_bias_retraction and self.motion_policy["bias_retraction_requires_crossing"]:
+            if nominal_delta*old_bias > 0 or not stationary_confirmed:
+                if self._motion_trace is not None:
+                    self._motion_trace.record_action({"motor": motor["name"],
+                        "decision_monotonic_s": decision_at, "status": "skipped",
+                        "reason": "waiting_crossed_stationary_bias_retraction",
+                        "feedback_motor_deg": current, "nominal_target_motor_deg": nominal_motor_deg})
+                return None
+        recall_speed = self.motion_policy["bias_retraction_speed_deg_s"]
+        if axis_bias_retraction and recall_speed is not None:
+            command_cap = min(command_cap, recall_speed)
+            speed_floor = min(speed_floor, command_cap)
+
+        if bias_mode in (-1, 1) and nominal_q_rad is None and not axis_bias_retraction:
+            step = self.motion_policy["angle_step_deg"] * motor["ratio"]
+            actual_model_deg = (current-motor["offset_deg"])/(motor["sign"]*motor["ratio"])
+            allowed, axis_cap, levels = angle_bias_profile(self.motion_policy, motor,
+                actual_model_deg, math.degrees(nominal_q))
+            if not allowed:
+                if self._motion_trace is not None:
+                    self._motion_trace.record_action({"motor": motor["name"],
+                        "decision_monotonic_s": decision_at, "status": "skipped",
+                        "reason": "angle_bias_disabled_for_pose",
+                        "feedback_motor_deg": current, "nominal_target_motor_deg": nominal_motor_deg})
+                return None
+            cap = axis_cap * motor["ratio"]
+            magnitude = abs(self._settling_bias_centi[i])/100
+            if bias_mode > 0:
+                sign = 1 if nominal_delta > 0 else -1
+                next_bias = (next((v*motor['ratio'] for v in levels
+                    if v*motor['ratio'] > magnitude+.005), cap) if levels else magnitude+step)
+                desired_bias = sign * min(cap, next_bias)
+            elif self._settling_bias_centi[i]:
+                old_bias = self._settling_bias_centi[i]/100
+                smaller = (max((v*motor['ratio'] for v in levels
+                    if v*motor['ratio'] < magnitude-.005), default=0.) if levels else max(0., magnitude-step))
+                desired_bias = math.copysign(smaller, old_bias)
+            else:
+                desired_bias = math.copysign(min(step, .5*abs(nominal_delta)), -nominal_delta)
+            pending_bias = round(desired_bias*100)
+            pending_retracted = False
+            retract_latch_centi = None
+            latch_locked = False
+        if axis_bias_retraction or nominal_return:
+            pending_bias = 0
+            pending_retracted = True
+            retract_latch_centi = nominal_target
+            latch_locked = False
+        if nominal_q_rad is not None:
+            target = self._clamp_motor_centi(motor, round(command_motor_deg * 100))
+            pending_bias = target - nominal_target
+            pending_retracted = external_retract
+        elif latch_locked:
+            target = last_key[0]
+        elif retract_latch_centi is not None:
+            target = retract_latch_centi
+        else:
+            target = self._clamp_motor_centi(
+                motor, nominal_target + (pending_bias if axis_end else 0))
+        if adaptive_mode and nominal_q_rad is None:
+            # Record the bounded target actually sent, not an unclipped
+            # requested offset. Subsequent .2-degree steps start here.
+            pending_bias = target - nominal_target
+        delta = target / 100 - current
+        # Generalize the recall conflict to both axes/directions and partial
+        # bias reductions, not just the final zero-bias write.
+        if (adaptive_mode and self.motion_policy["bias_retraction_requires_crossing"]
+                and last_key is not None and target != last_key[0]
+                and (old_bias or nominal_return)
+                and (target-last_key[0])*delta < -1e-9):
+            if self._motion_trace is not None:
+                self._motion_trace.record_action({"motor": motor["name"],
+                    "decision_monotonic_s": decision_at, "status": "skipped",
+                    "reason": "conflicting_target_retraction",
+                    "previous_target_motor_deg": last_key[0]/100,
+                    "target_motor_deg": target/100, "feedback_motor_deg": current})
+            return None
+        direction = 0 if delta > 0 else 1
+        # Use same_dir_uncertainty when continuing in the same direction
+        # only after confirmed stillness; first sends and reversals use the full budget.
+        if (last_key is not None and direction == last_key[1]) or (last_key is None and stationary_confirmed):
+            uncertainty = same_dir_uncertainty
+        else:
+            uncertainty = moving_uncertainty
+
+        # A diagnosed stall with fresh, sustained stationary feedback
+        # can resend the *same* target and direction at a higher tier.
+        # The new cap is not evidence of motion before that write.
+        stationary_stuck_upshift = (
+            stuck_upshift_axes is not None and stuck_upshift_axes[i]
+            and tier_changed and speed_tier > 0 and last_key is not None
+            and target == last_key[0] and direction == last_key[1]
+            and speed_floor > last_key[2]/100. + .005
+            and stationary_confirmed)
+        # All other tier changes, reversals and angle adjustments keep
+        # the original moving-direction uncertainty budget.
+        if (tier_changed or (adaptive_mode and (target != nominal_target
+                or (last_key is not None and last_key[0] != nominal_target)))):
+            uncertainty = max(uncertainty, moving_uncertainty)
+        stationary_stuck_angle_boost = bool(
+            adaptive_mode and stuck_angle_boost_axes is not None
+            and stuck_angle_boost_axes[i] and not axis_bias_retraction
+            and stationary_confirmed and last_key is not None
+            and direction == last_key[1] and target != last_key[0]
+            and abs(pending_bias) > abs(old_bias)
+            and (target-last_key[0])*(1 if direction == 0 else -1) > 0)
+        stationary_bias_retraction = bool(axis_bias_retraction and stationary_confirmed)
+        nominal_retry = bool(nominal_retry_axes is not None and nominal_retry_axes[i])
+        stationary_nominal_retry = bool(nominal_retry and stationary_confirmed
+            and last_key is not None and target == nominal_target
+            and direction == last_key[1] and pending_bias == 0)
+        stationary_nominal_return = bool(nominal_return and stationary_confirmed
+            and last_key is not None and target == nominal_target and pending_bias == 0
+            and abs(nominal_delta) > tolerance_motor_deg+1e-9)
+        if (stationary_stuck_upshift or stationary_stuck_angle_boost
+                or stationary_bias_retraction or stationary_nominal_retry or stationary_nominal_return):
+            uncertainty = stationary_uncertainty
+        trace = self._motion_trace
+        event = None if trace is None else {
+            "motor": motor["name"], "device": motor["device"],
+            "decision_monotonic_s": decision_at,
+            "reference_q_deg": math.degrees(q), "target_motor_deg": target / 100,
+            "nominal_target_motor_deg": nominal_motor_deg,
+            "nominal_delta_motor_deg": nominal_delta,
+            "stationary_direction_confirmed": stationary_confirmed,
+            "retraction_pending": retract_latch_centi is not None,
+            "settling_bias_motor_deg": (target - nominal_target) / 100,
+            "feedback_motor_deg": current, "delta_motor_deg": delta,
+            "feedback_speed_motor_deg_s": self._feedback[i].get("speed_deg_s"),
+            "speed_tier": speed_tier, "previous_speed_tier": previous_tier,
+            "axis_min_speed_deg_s": speed_floor, "command_speed_cap_deg_s": command_cap,
+            "angle_feedback_age_s": age, "angle_query_age_s": query_age,
+            "send_queue_delay_s": send_delay, "direction_uncertainty_deg": uncertainty,
+            "stationary_stuck_upshift": bool(stationary_stuck_upshift),
+            "stationary_stuck_angle_boost": stationary_stuck_angle_boost,
+            "axis_bias_retraction": axis_bias_retraction,
+            "stationary_bias_retraction": stationary_bias_retraction,
+            "stationary_nominal_retry": stationary_nominal_retry,
+            "stationary_nominal_return": stationary_nominal_return,
+            "speed_feedback_age_s": (None if self._feedback[i].get("speed_stamp") is None
+                                     else decision_at - self._feedback[i]["speed_stamp"]),
+        }
+        if nominal_return and not stationary_nominal_return:
+            if trace is not None:
+                trace.record_action({**event, "status": "skipped",
+                                     "reason": "waiting_stationary_nominal_return"})
+            return None
+        if nominal_retry and not stationary_nominal_retry:
+            if trace is not None:
+                trace.record_action({**event, "status": "skipped",
+                                     "reason": "waiting_stationary_nominal_retry"})
+            return None
+        settling_change = speed_tier < 0 and tier_changed and not stationary_nominal_return
+        if settling_change and ((not at_endpoint and not adaptive_mode) or last_key is None
+                or target != last_key[0] or direction != last_key[1]
+                or not stationary_confirmed
+                or abs(delta) <= max(uncertainty,
+                    self.recovery_config["settling_safe_distance_deg"] * motor["ratio"])):
+            if trace is not None:
+                trace.record_action({**event, "status": "skipped",
+                                     "reason": "unsafe_settling_speed_change"})
+            return None
+        if abs(delta) <= uncertainty or (
+                axis_end and nominal_q_rad is None and retract_latch_centi is None
+                and not settling_change
+                and abs(nominal_delta) <= tolerance_motor_deg + 1e-9
+                and last_key is not None):
+            self._prepare_skip_reason = "within_direction_uncertainty"
+            if trace is not None:
+                trace.record_action({**event, "status": "skipped",
+                                     "reason": "within_direction_uncertainty"})
+            return None
+        planned_sign = (0 if planned_directions is None or i >= len(planned_directions)
+                        else planned_directions[i])
+        planned_motor_dir = (None if planned_sign == 0
+                             else (0 if motor["sign"] * planned_sign > 0 else 1))
+        # Prevent mid-trajectory reverse A6 commands when an axis slightly
+        # leads its interpolated reference along the planned motion direction.
+        if (not at_endpoint and planned_motor_dir is not None
+                and not (stationary_bias_retraction or stationary_nominal_return) and direction != planned_motor_dir
+                and (abs(delta) <= lead_motor_deg or measured_speed > still_motor_speed)):
+            self._prepare_skip_reason = "within_direction_uncertainty"
+            if trace is not None:
+                trace.record_action({**event, "status": "skipped",
+                                     "reason": "within_direction_uncertainty"})
+            return None
+        # On stationary segments or at the endpoint, never issue a reverse
+        # A6 correction while the motor is still decelerating or already
+        # within angle tolerance of the target.
+        if ((axis_end or (planned_directions is not None and planned_motor_dir is None))
+                and not (stationary_bias_retraction or stationary_nominal_return)
+                and last_key is not None and direction != last_key[1]
+                and (abs(nominal_delta if axis_end else delta) <= tolerance_motor_deg
+                     or measured_speed > still_motor_speed)):
+            self._prepare_skip_reason = "within_direction_uncertainty"
+            if trace is not None:
+                trace.record_action({**event, "status": "skipped",
+                                     "reason": "within_direction_uncertainty"})
+            return None
+        velocity = (0.0 if planned_velocities is None else
+                    abs(math.degrees(planned_velocities[i])) * motor["ratio"])
+        desired_speed = (self.config["speed_feedforward_gain"] * velocity
+                         + self.config["speed_error_gain_s"] * abs(delta))
+        # Continuous formula changes do not trigger retransmission.
+        # A latched recovery floor survives all nodes of this monotonic run.
+        base_speed = min(self.config["max_speed_deg_s"],
+                         max(self.config["min_speed_deg_s"], desired_speed))
+        speed = max(1, round(min(command_cap, max(speed_floor, base_speed)) * 100))
+        wire = position_frame(motor["id"], direction, target, speed)
+        key = (target, direction, speed, speed_tier)
+        if last_key is not None and last_key[0] == target:
+            # Only re-send an identical target if the previous 0xA6 reply
+            # was never received (unacknowledged frame loss). Once acked,
+            # repeating the exact same target every 500ms does not add torque.
+            stalled_unacked = (
+                direction == last_key[1]
+                and not self._last_target_acked[i]
+                and abs(nominal_delta if axis_end else delta) > max(uncertainty, tolerance_motor_deg)
+                and measured_speed <= still_motor_speed
+                and decision_at - self._last_target_sent_at[i] >= max(
+                    0.25, 5 / self.config["command_rate_hz"])
+            )
+            # Never turn a same-position resend into a new forced
+            # A6 direction. Only a discrete tier transition may update
+            # an acknowledged target once; raw speed rounding is ignored.
+            same_direction_tier_change = tier_changed and direction == last_key[1]
+            if ((direction != last_key[1] and not stationary_nominal_return)
+                    or not (stalled_unacked or same_direction_tier_change or stationary_nominal_retry or stationary_nominal_return)):
+                if trace is not None:
+                    trace.record_action({**event, "status": "skipped",
+                                         "reason": "unchanged_active_target"})
+                return None
+        elif (coalesce_steps and not at_endpoint and retract_latch_centi is None
+              and not external_force and pending_bias == self._settling_bias_centi[i]
+              and last_key is not None
+              and direction == last_key[1]):
+            # Merge only temporarily; a changed target gets an exit.
+            step_deg = abs(target - last_key[0]) / 100.0
+            if (step_deg < self.config["coalesce_step_deg"] * motor["ratio"]
+                    and decision_at - self._last_target_sent_at[i] < self.config["coalesce_wait_s"]):
+                if trace is not None:
+                    trace.record_action({**event, "status": "skipped", "reason": "coalesced_small_step"})
+                return None
+        return dict(wire=wire, key=key, target=target, nominal_target=nominal_target,
+                    pending_bias=pending_bias, pending_retracted=pending_retracted,
+                    axis_end=axis_end, event=event,
+                    needs_validation=bool(adaptive_mode
+                        and (target != nominal_target or axis_bias_retraction or nominal_return)
+                        and (last_key is None or target != last_key[0] or nominal_return)))
 
     @staticmethod
     def _cartesian_target(meta, arm, nominal, lead_mm):
@@ -1181,32 +1291,23 @@ class MotorPair:
                 from .scene import SimpleScene
                 geometry_scene = SimpleScene(geometry_context["scene"])
 
-            def recovery_angle_safe(axis, target_centi):
+            from .recovery_geometry import RecoveryGeometry
+
+            def check_recovery_pose(q):
                 if geometry_scene is None and phase.get("phase") not in ("push", "push_correction"):
                     return False
-                motor = self.motors[axis]
-                desired = math.radians((target_centi/100-motor["offset_deg"])/(motor["sign"]*motor["ratio"]))
-                if not motor["limits_deg"][0] <= math.degrees(desired) <= motor["limits_deg"][1]:
+                if any(not m["limits_deg"][0] <= math.degrees(v) <= m["limits_deg"][1]
+                       for m, v in zip(self.motors, q)):
                     return False
-                for other_from_command in (False, True):
-                    start = list(state["q_rad"])
-                    other = 1-axis
-                    key = self._last_targets[other]
-                    if other_from_command and key is not None:
-                        m = self.motors[other]
-                        start[other] = math.radians((key[0]/100-m["offset_deg"])/(m["sign"]*m["ratio"]))
-                    end = list(start); end[axis] = desired
-                    samples = max(1, math.ceil(abs(desired-start[axis])/math.radians(.1)))
-                    for k in range(samples+1):
-                        q = [a+(b-a)*k/samples for a,b in zip(start,end)]
-                        if any(not m["limits_deg"][0] <= math.degrees(value) <= m["limits_deg"][1]
-                               for m,value in zip(self.motors,q)):
-                            return False
-                        if cart_arm is not None and cart_arm.world_normal(q,cart_meta["direction"])[0] * (1 if cart_meta["direction"] == "+x" else -1) <= 0:
-                            return False
-                        if geometry_scene is not None and geometry_scene.check(q, geometry_context["sliders"], geometry_context["contact"]):
-                            return False
-                return True
+                if cart_arm is not None and cart_arm.world_normal(q, cart_meta["direction"])[0] * (1 if cart_meta["direction"] == "+x" else -1) <= 0:
+                    return False
+                return geometry_scene is None or not geometry_scene.check(
+                    q, geometry_context["sliders"], geometry_context["contact"])
+
+            recovery_angle_safe = RecoveryGeometry(self.motors, self._feedback,
+                                                    self._last_targets, check_recovery_pose,
+                nominal_targets=lambda: [round(self._motor_deg(m, math.degrees(q))*100)
+                    for m, q in zip(self.motors, cursor.target())])
 
             def commands_ready():
                 if adaptive and not recovery.node_ready():
@@ -1232,6 +1333,7 @@ class MotorPair:
                 trace.execution.update({
                     "stage": stage, "stage_elapsed_s": at-stage_started,
                     "speed_recovery": recovery.snapshot(),
+                    "recovery_geometry": recovery_angle_safe.snapshot(),
                     "wall_elapsed_s": at-started, "clock": "discrete_waypoints",
                     "waypoint_index": cursor.index, "waypoint_count": len(points),
                     "waypoint_tolerances_deg": list(cursor.tolerances_deg),

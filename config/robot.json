@@ -130,7 +130,15 @@
       "final_speed_deg_s": 90.0,
       "max_recovery_rounds": 3,
       "overshoot_return_enabled": true,
-      "overshoot_return_speed_deg_s": 18.0
+      "overshoot_return_speed_deg_s": 18.0,
+      "bias_retraction_speed_deg_s": 18.0,
+      "bias_retraction_requires_crossing": true,
+      "axis_angle_bias": {
+        "upper": {
+          "below_model_deg": 160.0,
+          "max_deg": 0.2
+        }
+      }
     }
   },
   "verification": {

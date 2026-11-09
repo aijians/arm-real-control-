@@ -10,6 +10,9 @@ DEFAULTS = {
     'angle_steps_deg': None, 'final_speed_deg_s': None,
     'max_recovery_rounds': 1,
     'overshoot_return_enabled': False, 'overshoot_return_speed_deg_s': 18.,
+    'bias_retraction_speed_deg_s': None,
+    'bias_retraction_requires_crossing': False,
+    'axis_angle_bias': {},
     'cartesian_step_mm': .2, 'cartesian_max_mm': .4,
     'ordinary_speed_steps_deg_s': [6., 12., 18.],
     'downshift_steps_deg_s': [2., 6., 18., 30.],
@@ -21,7 +24,8 @@ def motion_policy_settings(hardware):
     if not isinstance(raw, dict) or set(raw)-set(DEFAULTS):
         raise ValueError('invalid motion_recovery settings')
     result = {**DEFAULTS, **raw}
-    if type(result['enabled']) is not bool or type(result['overshoot_return_enabled']) is not bool:
+    if (type(result['enabled']) is not bool or type(result['overshoot_return_enabled']) is not bool
+            or type(result['bias_retraction_requires_crossing']) is not bool):
         raise ValueError('motion_recovery.enabled must be bool')
     for key in ('max_downshifts', 'max_angle_changes', 'max_recovery_rounds'):
         if type(result[key]) is not int or not 1 <= result[key] <= 4:
@@ -58,7 +62,36 @@ def motion_policy_settings(hardware):
     speed = result['overshoot_return_speed_deg_s']
     if type(speed) not in (int,float) or not math.isfinite(speed) or not hardware.get('min_speed_deg_s',2.) <= speed <= 18.:
         raise ValueError('invalid motion_recovery.overshoot_return_speed_deg_s')
+    recall_speed = result['bias_retraction_speed_deg_s']
+    if recall_speed is not None and (type(recall_speed) not in (int, float)
+            or not math.isfinite(recall_speed)
+            or not hardware.get('min_speed_deg_s', 2.) <= recall_speed <= 18.):
+        raise ValueError('invalid motion_recovery.bias_retraction_speed_deg_s')
+    rules = result['axis_angle_bias']
+    names = {m['name'] for m in hardware.get('motors', [])}
+    if not isinstance(rules, dict) or set(rules)-names:
+        raise ValueError('invalid motion_recovery.axis_angle_bias')
+    for rule in rules.values():
+        if not isinstance(rule, dict) or set(rule) != {'below_model_deg', 'max_deg'}:
+            raise ValueError('invalid axis angle-bias rule')
+        for key, maximum in (('below_model_deg', 360.), ('max_deg', result['angle_max_deg'])):
+            value = rule[key]
+            if type(value) not in (int, float) or not math.isfinite(value) or not 0 < value <= maximum:
+                raise ValueError('invalid axis angle-bias '+key)
     return result
+
+
+def angle_bias_profile(policy, motor, actual_deg, nominal_deg):
+    """Model joint degrees, independent of motor offset/sign/reduction."""
+    rule = policy['axis_angle_bias'].get(motor['name'])
+    cap = policy['angle_max_deg'] if rule is None else rule['max_deg']
+    allowed = rule is None or max(actual_deg, nominal_deg) < rule['below_model_deg']-1e-9
+    levels = policy['angle_steps_deg']
+    if levels is not None:
+        levels = [v for v in levels if v <= cap+1e-9]
+        if not levels or levels[-1] < cap-1e-9:
+            levels.append(cap)
+    return allowed, cap, levels
 
 
 class MotionRecovery(SpeedRecovery):
@@ -88,6 +121,8 @@ class MotionRecovery(SpeedRecovery):
         self.return_attempted = [False]*n
         self.return_written_at = [-math.inf]*n
         self.nominal_goals_deg = [None]*n
+        self.bias_allowed = [True]*n
+        self.bias_caps_deg = [self.policy['angle_max_deg']]*n
 
     def eligible(self, axis):
         return self.policy['enabled'] and self.phase in (
@@ -231,8 +266,14 @@ class MotionRecovery(SpeedRecovery):
         self.nominal_goals_deg = [math.degrees(q) for q in goal]
         self.observe_goal(state, goal)
         for axis in active:
+            allowed, cap, _ = angle_bias_profile(self.policy, self.motors[axis],
+                math.degrees(state['q_rad'][axis]), math.degrees(goal[axis]))
+            self.bias_allowed[axis], self.bias_caps_deg[axis] = allowed, cap
             if not self.eligible(axis):
                 continue
+            request = self.pending[axis]
+            if not allowed and request is not None and request['kind'].startswith('angle_'):
+                self.cancel_pending(axis, now, 'angle_bias_disabled_for_pose')
             if (self.returning[axis] and abs(math.degrees(state['q_rad'][axis]-goal[axis])) <= tolerances[axis]+1e-9
                     and state['axis_stamp_monotonic_s'][axis] >= self.return_written_at[axis]+.1
                     and self._angle_window_still(axis, state, .1)):
@@ -295,12 +336,23 @@ class MotionRecovery(SpeedRecovery):
                 elif final is not None and not self.final_speed_used[axis]:
                     # The last tier is gated by an actually written maximum
                     # bias, a no-progress window, and a separate nominal recall.
-                    if self.final_speed_ready[axis] and abs(biases[axis]) < .005:
+                    if not allowed and abs(biases[axis]) < .005:
                         self._request(axis, now, len(steps), final, 'up')
-                    elif abs(biases[axis]) >= self.policy['angle_max_deg']*self.motors[axis]['ratio']-.005:
-                        self._request(axis, now, self.speed_tier[axis],
-                                      self.axis_min_speed_deg_s[axis], 'bias_clear')
-                        self.pending[axis]['bias_before'] = biases[axis]
+                        self.event(now, 'final_speed_requested_without_angle_bias', axis)
+                    elif self.final_speed_ready[axis] and abs(biases[axis]) < .005:
+                        self._request(axis, now, len(steps), final, 'up')
+                    elif abs(biases[axis]) >= cap*self.motors[axis]['ratio']-.005:
+                        if self.policy['bias_retraction_requires_crossing']:
+                            # Keep the certified drive target. Recalling it on
+                            # the near side just to unlock 90 reintroduces the
+                            # old/new/actual direction conflict.
+                            self._request(axis, now, len(steps), final, 'up')
+                            self.event(now, 'final_speed_requested_keep_bias', axis,
+                                       bias_motor_deg=biases[axis])
+                        else:
+                            self._request(axis, now, self.speed_tier[axis],
+                                          self.axis_min_speed_deg_s[axis], 'bias_clear')
+                            self.pending[axis]['bias_before'] = biases[axis]
                     else:
                         self._angle_or_exhaust(axis, now, biases[axis], 'angle_up')
                 else:
@@ -322,8 +374,16 @@ class MotionRecovery(SpeedRecovery):
         return None
 
     def _angle_or_exhaust(self, axis, now, bias, kind):
-        if (self.angle_changes[axis] < self.policy['max_angle_changes']
-                and not (kind == 'angle_up' and self.final_speed_used[axis])):
+        # A waypoint can enter the permitted region after a speed-only 90
+        # recovery above the threshold. Allow its first small bias there,
+        # without re-injecting a bias after an already completed bias cycle.
+        first_zone_bias = (self.motors[axis]['name'] in self.policy['axis_angle_bias']
+                           and self.angle_changes[axis] == 0 and abs(bias) < .005)
+        angle_room = (kind != 'angle_up'
+                      or abs(bias) < self.bias_caps_deg[axis]*self.motors[axis]['ratio']-.005)
+        if (self.bias_allowed[axis] and self.angle_changes[axis] < self.policy['max_angle_changes']
+                and angle_room
+                and not (kind == 'angle_up' and self.final_speed_used[axis] and not first_zone_bias)):
             self._request(axis, now, self.speed_tier[axis], self.axis_min_speed_deg_s[axis], kind)
             self.pending[axis]['bias_before'] = bias
         else:
@@ -410,6 +470,8 @@ class MotionRecovery(SpeedRecovery):
                 'diagnoses': list(self.diagnoses), 'downshifts': list(self.downshifts),
                 'angle_changes': list(self.angle_changes), 'angle_bias_motor_deg': list(self.last_bias),
                 'angle_steps_deg': self.policy['angle_steps_deg'],
+                'axis_angle_bias_allowed': list(self.bias_allowed),
+                'axis_angle_bias_caps_deg': list(self.bias_caps_deg),
                 'final_speed_deg_s': self.policy['final_speed_deg_s'],
                 'final_speed_used': list(self.final_speed_used),
                 'waypoint_index': self.node_index, 'recovery_round': self.round_index,
