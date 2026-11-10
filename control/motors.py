@@ -1,6 +1,6 @@
 """Two independent RS485 motors, with continuous trajectory streaming.
 
-Only A6 (position), 94/9C (feedback), and 81 (stop) are emitted. Opening a
+Only A4/A6 (position), 94/9C (feedback), and 81 (stop) are emitted. Opening a
 port never enables, homes, or writes an encoder zero. Linux standard library
 only; the protocol is the one already used by the board's existing program.
 """
@@ -15,13 +15,13 @@ import termios
 import threading
 import time
 
-from .trajectory import WaypointCursor, GoalQualification
+from .trajectory import WaypointCursor, GoalQualification, timed_free_points
 from .kinematics import PlanarArm
 from .recovery import SpeedRecovery, recovery_settings
 from .motion_policy import MotionRecovery, motion_policy_settings
 
 from .protocol import (angle_from_reply, extract_frame, make_frame,
-                       position_frame, state_from_reply)
+                       position_frame, multi_turn_position_frame, state_from_reply)
 
 
 class HardwareError(RuntimeError):
@@ -346,6 +346,12 @@ class MotorPair:
                                         "free_timed_motion.speed_deg_s")
         if not 0 < self.free_timed_speed <= self.config["max_speed_deg_s"]:
             raise ValueError("invalid free_timed_motion.speed_deg_s")
+        self.free_timed_step = _finite(timed.get("max_step_deg", .2),
+                                       "free_timed_motion.max_step_deg")
+        self.free_timed_period = _finite(timed.get("period_s", .05),
+                                         "free_timed_motion.period_s")
+        if self.free_timed_step <= 0 or self.free_timed_period <= 0:
+            raise ValueError("free_timed_motion step and period must be positive")
         self.motors = [dict(m) for m in self.config["motors"]]
         if len(self.motors) != 2:
             raise ValueError("Exactly two motors are required")
@@ -502,7 +508,7 @@ class MotorPair:
                                     motor_deg=angle, angle_stamp=now,
                                     angle_query_stamp=(now if query_at is None or query_at > now
                                                        else query_at))
-                            elif frame.command in (0x9C, 0xA6):
+                            elif frame.command in (0x9C, 0xA4, 0xA6):
                                 state = state_from_reply(frame)
                                 self._feedback[i].update(state, speed_stamp=now)
                                 if frame.command == 0xA6:
@@ -511,7 +517,7 @@ class MotorPair:
                             # A well-checksummed frame with the wrong payload is
                             # still not valid feedback. It cannot refresh age.
                             continue
-                        if self._motion_trace is not None and frame.command in (0x94, 0x9C, 0xA6):
+                        if self._motion_trace is not None and frame.command in (0x94, 0x9C, 0xA4, 0xA6):
                             self._motion_trace.record_reply(self.motors[i], frame, now)
                 if empty_read:
                     # Check once for a fault that arrived after the first
@@ -1090,65 +1096,28 @@ class MotorPair:
         return math.hypot(a[0]-b[0], a[1]-b[1]) <= .1+1e-9
 
     def _send_free_timed_target(self, q_rad, trace):
-        """Write a nominal target once. Feedback only selects a safe A6 direction."""
+        """Write both absolute A4 targets, without consulting tracking feedback."""
         sent = 0
         with self._io_lock:
             for i, (motor, port, q) in enumerate(zip(self.motors, self.ports, q_rad)):
                 if self._halt_event.is_set():
                     raise HardwareError("motion_halted")
                 target = round(self._motor_deg(motor, math.degrees(q)) * 100)
-                previous = self._last_targets[i]
-                if previous is not None and previous[0] == target:
-                    continue
-                # A6 has an explicit direction. Never send an ambiguous target:
-                # refresh once, then fail rather than wait for waypoint arrival.
-                for attempt in range(2):
-                    reply = self._feedback[i]
-                    now = time.monotonic()
-                    age = max(0., now - reply["angle_query_stamp"])
-                    delay = max(0., port._next_send_at - now)
-                    speed_bound = max(self.free_timed_speed, abs(reply["speed_deg_s"]),
-                                      previous[2]/100 if previous else self.config["max_speed_deg_s"])
-                    margin = speed_bound * (age + delay + 14*10/self.config["baudrate"]) + .015
-                    delta = target / 100 - reply["motor_deg"]
-                    if abs(delta) > margin:
-                        break
-                    if attempt == 0:
-                        # Angle-only refresh avoids the extra state-query round
-                        # trip consuming the small target's direction margin.
-                        time.sleep(max(0., port._next_send_at-time.monotonic()))
-                        since = time.monotonic()
-                        self._request_feedback(axes=[i], include_speed=False)
-                        while self._feedback[i]["angle_query_stamp"] < since:
-                            if self._halt_event.is_set():
-                                raise HardwareError("motion_halted")
-                            if time.monotonic()-since >= self.config["feedback_timeout_s"]:
-                                raise HardwareError("joint_feedback_stale", {"motor": motor["name"]})
-                            self._pump(.001)
-                        self._snapshot()  # Fresh angle must still satisfy joint limits.
-                event = {"motor": motor["name"], "decision_monotonic_s": time.monotonic(),
-                         "target_motor_deg": target/100, "nominal_target_motor_deg": target/100,
-                         "speed_limit_deg_s": self.free_timed_speed,
-                         "direction_uncertainty_deg": margin, "bias_motor_deg": 0.}
-                if abs(delta) <= margin:
-                    # Quantized equality is not a move. Only retain a known
-                    # existing target in the final acceptance band.
-                    if abs(delta) <= .02 and (previous is None or abs(previous[0]-target) <= 2):
-                        trace.record_action({**event, "status": "skipped", "reason": "already_at_target"})
-                        continue
-                    raise HardwareError("free_timed_direction_ambiguous", {
-                        "motor": motor["name"], "delta_motor_deg": delta,
-                        "direction_margin_deg": margin})
-                direction = 0 if delta > 0 else 1
                 speed = max(1, round(self.free_timed_speed * 100))
-                wire = position_frame(motor["id"], direction, target, speed)
-                event.update(direction=direction, tx_hex=wire.hex(" "))
+                wire = multi_turn_position_frame(motor["id"], target, speed)
+                event = {"motor": motor["name"], "decision_monotonic_s": time.monotonic(),
+                         "command": "0xa4", "target_motor_deg": target/100,
+                         "nominal_target_motor_deg": target/100,
+                         "speed_limit_deg_s": self.free_timed_speed,
+                         "bias_motor_deg": 0., "tx_hex": wire.hex(" ")}
                 try:
                     port.send(wire, cancel_event=self._halt_event)
                 except BaseException:
                     trace.record_action({**event, "status": "send_failed"})
                     raise
-                self._last_targets[i] = (target, direction, speed)
+                # The legacy A6 cache includes a forced direction; an A4 write
+                # invalidates that cache before a later Push/withdraw phase.
+                self._last_targets[i] = None
                 self._last_target_sent_at[i] = time.monotonic()
                 self._last_target_acked[i] = False
                 trace.record_action({**event, "status": "sent",
@@ -1157,8 +1126,9 @@ class MotorPair:
         return sent
 
     def _move_free_timed(self, phase, health_check=None):
-        """Send every Free waypoint by its absolute planned time; qualify only the end."""
-        points = self._validate_phase(phase)
+        """Send small A4 targets at a fixed period; qualify only the end."""
+        points = timed_free_points(self._validate_phase(phase),
+                                   self.free_timed_step, self.free_timed_period)
         trace = _MotionTrace(phase, points, self.config, self.motors)
         if not self._move_lock.acquire(blocking=False):
             raise HardwareError("motion_already_running")
@@ -1174,7 +1144,10 @@ class MotorPair:
         samples, schedule = deque(maxlen=10000), []
         sample_count = 0
         trace.execution.update(controller="free_timed", stage="tracking",
+                               position_command="0xa4",
                                fixed_speed_deg_s=self.free_timed_speed,
+                               max_step_deg=self.free_timed_step,
+                               period_s=self.free_timed_period,
                                automatic_retry=False, schedule=schedule)
         try:
             state = self._read_state()
@@ -1187,7 +1160,8 @@ class MotorPair:
             index = 1
             next_feedback = started
             last_sample_stamp = None
-            last_write = started - 1/self.config["command_rate_hz"]
+            dispatch_period = max(self.free_timed_period, 1/self.config["command_rate_hz"])
+            last_write = started - dispatch_period
             end_at = None
             qualifier = GoalQualification(self.config["angle_tolerance_deg"],
                 self.config["still_speed_deg_s"], self.config["goal_hold_s"], self.config["stable_s"])
@@ -1217,14 +1191,16 @@ class MotorPair:
                 # No measured error, progress, speed, or acknowledgement gates
                 # advancement. Late nodes stay ordered; never burst or drop them.
                 if (index < len(points) and now-started >= points[index][0]
-                        and now-last_write >= 1/self.config["command_rate_hz"]):
+                        and now-last_write >= dispatch_period):
                     elapsed, target = points[index]
+                    last_write = time.monotonic()
                     written = self._send_free_timed_target(target, trace)
                     sent_count += written
-                    last_write = time.monotonic()
+                    completed = time.monotonic()
                     schedule.append({"index": index, "planned_time_s": elapsed,
-                        "write_completed_elapsed_s": last_write-started,
-                        "lateness_s": last_write-started-elapsed, "axes_written": written})
+                        "write_started_elapsed_s": last_write-started,
+                        "write_completed_elapsed_s": completed-started,
+                        "lateness_s": completed-started-elapsed, "axes_written": written})
                     index += 1
                 trace.execution.update(next_waypoint_index=index,
                     waypoints_dispatched=len(schedule), motion_commands_sent=sent_count)
@@ -1252,7 +1228,11 @@ class MotorPair:
                     if time.monotonic() >= end_at + self.config["goal_settle_timeout_s"] + self.config["goal_hold_s"]:
                         raise HardwareError("motion_goal_hold_timeout" if qualifier.armed
                                             else "motion_goal_settle_timeout")
-                self._pump(.005)
+                wait_s = .005
+                if index < len(points):
+                    due = max(started+points[index][0], last_write+dispatch_period)
+                    wait_s = min(wait_s, max(0., due-time.monotonic()))
+                self._pump(wait_s)
         except BaseException as exc:
             trace.execution.update(feedback_samples=list(samples),
                 dropped_feedback_samples=sample_count-len(samples))

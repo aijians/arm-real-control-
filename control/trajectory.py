@@ -3,6 +3,28 @@ import bisect
 import math
 
 
+def timed_free_points(points, max_step_deg, period_s):
+    """Subdivide the joint polyline and give every successor one fixed period.
+
+    Input/output use (time_s, q_rad) pairs. Original vertices, reversals and
+    the exact final target survive; original timestamps do not set the pace.
+    """
+    for name, value in (("max_step_deg", max_step_deg), ("period_s", period_s)):
+        if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+            raise ValueError("invalid free_timed_motion." + name)
+    result = [(0., list(points[0][1]))]
+    for (_, a), (_, b) in zip(points, points[1:]):
+        span = max(abs(math.degrees(y-x)) for x, y in zip(a, b))
+        if span <= 1e-12:
+            continue
+        count = max(1, math.ceil(span / max_step_deg - 1e-9))
+        for index in range(1, count + 1):
+            q = (list(b) if index == count else
+                 [x + (y-x)*index/count for x, y in zip(a, b)])
+            result.append((len(result)*period_s, q))
+    return result
+
+
 class WaypointCursor:
     """Select one planned waypoint at a time using new joint feedback.
 

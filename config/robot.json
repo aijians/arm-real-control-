@@ -131,7 +131,9 @@
     },
     "free_timed_motion": {
       "enabled": true,
-      "speed_deg_s": 10.0
+      "speed_deg_s": 10.0,
+      "max_step_deg": 0.2,
+      "period_s": 0.05
     }
   },
   "verification": {

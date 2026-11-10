@@ -32,6 +32,15 @@ def position_frame(motor_id, direction, angle_centideg, speed_centideg_s):
                       + speed_centideg_s.to_bytes(4, "little"))
 
 
+def multi_turn_position_frame(motor_id, angle_centideg, speed_centideg_s):
+    """A4: signed int64 absolute angle, uint32 speed, both in 0.01 units."""
+    if not (type(angle_centideg) is int and -(1 << 63) <= angle_centideg < (1 << 63)
+            and type(speed_centideg_s) is int and 0 < speed_centideg_s <= 36000):
+        raise ValueError("A4 position or speed out of range")
+    return make_frame(0xA4, motor_id, angle_centideg.to_bytes(8, "little", signed=True)
+                      + speed_centideg_s.to_bytes(4, "little"))
+
+
 def parse_frame(data):
     if len(data) < 5 or data[0] != 0x3E or data[4] != sum(data[:4]) & 255:
         raise ValueError("Invalid frame header")
@@ -81,7 +90,7 @@ def angle_from_reply(frame):
 
 
 def state_from_reply(frame):
-    if frame.command not in (0x9C, 0xA6) or len(frame.payload) != 7:
+    if frame.command not in (0x9C, 0xA4, 0xA6) or len(frame.payload) != 7:
         raise ValueError("Invalid state-2 reply")
     p = frame.payload
     return {"temperature_c": int.from_bytes(p[:1], "little", signed=True),

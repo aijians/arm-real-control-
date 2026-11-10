@@ -137,7 +137,15 @@ class VirtualDrive:
             self.target[axis] = target
             self.command_speed[axis] = int.from_bytes(wire[9:13], "little") / 100.
             if self.ack:
-                self.pending_acks.append(axis)
+                self.pending_acks.append((axis, command))
+        elif command == 0xA4:
+            if self.lost_targets:
+                self.lost_targets -= 1
+                return
+            self.target[axis] = int.from_bytes(wire[5:13], "little", signed=True) / 100.
+            self.command_speed[axis] = int.from_bytes(wire[13:17], "little") / 100.
+            if self.ack:
+                self.pending_acks.append((axis, command))
         elif command == 0x81:
             self.target[axis] = self.q[axis]
             self.velocity[axis] = 0.
@@ -148,9 +156,10 @@ class VirtualDrive:
         if self.pumps > 40000:
             raise RuntimeError("virtual loop budget exceeded")
         self.advance(max(.001, timeout_s))
-        for axis in self.pending_acks:
-            self.pair._last_target_acked[axis] = True
-            self.refresh(axis, 0xA6)
+        for axis, command in self.pending_acks:
+            if command == 0xA6:
+                self.pair._last_target_acked[axis] = True
+            self.refresh(axis, command)
         self.pending_acks.clear()
 
     def halt(self):
@@ -180,3 +189,7 @@ class VirtualDrive:
                 if item[2] == 0xA6 and (axis is None or item[1] == axis)]
 
 
+
+    def a4(self, axis=None):
+        return [item for item in self.frames
+                if item[2] == 0xA4 and (axis is None or item[1] == axis)]

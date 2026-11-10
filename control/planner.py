@@ -16,6 +16,7 @@ import time
 from .config import resolve, push_correction_settings
 from .kinematics import PlanarArm
 from .scene import SimpleScene
+from .trajectory import timed_free_points
 
 
 class PlanError(RuntimeError):
@@ -228,6 +229,17 @@ class Planner:
             name, points, metadata.get("direction", "+x"), _collision_context)
         recovery_geometry = None
         hardware = self.config.get("hardware", {})
+        timed = hardware.get("free_timed_motion", {})
+        timing = "quintic_progress_on_joint_polyline"
+        if name == "free" and timed.get("enabled", False):
+            try:
+                points = [{"time_s": t, "q_rad": q} for t, q in timed_free_points(
+                    [(p["time_s"], p["q_rad"]) for p in points],
+                    timed.get("max_step_deg", .2), timed.get("period_s", .05))]
+            except ValueError as exc:
+                raise PlanError(str(exc)) from exc
+            source_indices = None  # Subdivided nodes are between source vertices.
+            timing = "fixed_period_on_joint_polyline"
         policy_enabled = (hardware.get("motion_recovery", {}).get("enabled", False)
                           and not (name == "free" and hardware.get("free_timed_motion", {}).get("enabled", False)))
         if policy_enabled and _collision_context is not None:
@@ -245,7 +257,7 @@ class Planner:
                 "motion_recovery_geometry": recovery_geometry,
                 "waypoint_min_axis_step_deg": self.waypoint_min_axis_step_deg,
                 "protected_micro_steps": protected_micro_steps, "angle_convention": "model_q1_world_bearing_q2_BAC",
-                "time_parameterization": "quintic_progress_on_joint_polyline",
+                "time_parameterization": timing,
                 "dense_point_count": dense_count, "source_point_indices": source_indices,
                 "command_point_count": len(points),
                 "waypoint_min_step_deg": self.waypoint_min_step_deg,
