@@ -344,7 +344,8 @@ class MotorPair:
         self.free_timed = timed.get("enabled", False)
         self.free_timed_speed = _finite(timed.get("speed_deg_s", 10.),
                                         "free_timed_motion.speed_deg_s")
-        if not 0 < self.free_timed_speed <= self.config["max_speed_deg_s"]:
+        # Free has its own fixed A4 speed, independent of the legacy executor cap.
+        if not 0 < self.free_timed_speed <= 360:
             raise ValueError("invalid free_timed_motion.speed_deg_s")
         self.free_timed_step = _finite(timed.get("max_step_deg", .2),
                                        "free_timed_motion.max_step_deg")
