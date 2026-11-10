@@ -264,8 +264,10 @@ class RailFollower:
             remaining = d * (self.path[b][i] - q_deg[i])
             spans = now - h[0][0] >= s.stall_window_s - 1e-9
             moved = d * (q_deg[i] - h[0][1])
-            pulled = d * (self.targets[i] - q_deg[i]) >= self.lead_floor[i] - 1e-9 if (
-                self.master is None or i == self.master) else d * (self.targets[i] - q_deg[i]) >= self.slave_lead - 1e-9
+            # Written targets come back quantized to 0.01 deg: allow for it, or a
+            # target sitting exactly at the floor never counts as pulling.
+            floor = self.lead_floor[i] if (self.master is None or i == self.master) else self.slave_lead
+            pulled = d * (self.targets[i] - q_deg[i]) >= floor - 0.006
             stalled[i] = bool(spans and pulled and remaining > s.corner_tolerance_deg
                               and moved < s.progress_eps_deg and not self._corner_reached(i, b, q_deg[i], now))
             good = s.progress_good_ratio * self.speeds[i] * s.stall_window_s

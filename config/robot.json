@@ -95,7 +95,7 @@
       "stream_speed_ratio": 0.5,
       "free_max_lead_deg": 0.5,
       "push_max_lead_deg": 1.2,
-      "follower_speed_deg_s": 5.0,
+      "follower_speed_deg_s": 10.0,
       "follower": {}
     }
   },

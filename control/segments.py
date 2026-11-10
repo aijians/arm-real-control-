@@ -97,8 +97,9 @@ def follower_settings(settings, profile):
         raise ValueError("invalid segmented_motion.follower keys: " + ", ".join(sorted(set(extra) - allowed)))
     push = profile["mode"] == "progressive_push"
     base = settings["push_speed_deg_s" if push else "free_speed_deg_s"]
-    speed = min(settings["follower_speed_deg_s"], profile["speed_deg_s"]) * (
-        1. if push else profile["speed_deg_s"] / base)
+    # Scale once (an oscillation retry slows Free by its own ratio), then cap.
+    speed = min(profile["speed_deg_s"],
+                settings["follower_speed_deg_s"] * (1. if push else profile["speed_deg_s"] / base))
     steps = (settings["free_upper_max_step_deg"], settings["free_max_step_deg"])
     return FollowerSettings(write_step_deg=steps, speed_deg_s=(speed, speed), **extra).validate()
 
