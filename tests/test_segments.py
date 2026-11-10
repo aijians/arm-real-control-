@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from control.motors import HardwareError, MotorPair
-from control.segments import phase_profile, resample_route, segment_settings, stream_speed_deg_s
+from control.segments import phase_profile, resample_route, segment_settings, stream_speed_deg_s, follower_settings
 from virtual_drive import VirtualDrive, config, phase
 
 
@@ -103,28 +103,25 @@ class RouteTests(unittest.TestCase):
 
 class ExecutionTests(unittest.TestCase):
     def assert_wires(self, d, planned, cap, step):
-        """Targets are nominal nodes, steps bounded, and each A6 speed field is
-        the streamed field for that node (never above the phase cap)."""
+        """D19 rail following: every A6 target lies within the route's range on
+        its axis, consecutive writes respect the per-write step, and the speed
+        field is the follower's (never above the phase cap)."""
         pts=planned['points']
-        nominal = [{round(d.pair._motor_deg(m, math.degrees(p['q_rad'][i]))*100)
-                    for p in pts} for i,m in enumerate(d.pair.motors)]
-        profile=phase_profile(
-            d.pair.segments, planned['phase'], retry_after_oscillation=planned.get('free_retry_after_oscillation', False))
-        fields=[{} for _ in d.pair.motors]
-        for k in range(1,len(pts)):
-            for i,m in enumerate(d.pair.motors):
-                key=round(d.pair._motor_deg(m, math.degrees(pts[k]['q_rad'][i]))*100)
-                inc=abs(math.degrees(pts[k]['q_rad'][i]-pts[k-1]['q_rad'][i]))*m['ratio']
-                fields[i].setdefault(key,set()).add(round(stream_speed_deg_s(profile,inc,d.pair.config['command_rate_hz'])*100))
-        previous=[round(d.pair._motor_deg(m,math.degrees(planned['points'][0]['q_rad'][i]))*100)
-                  for i,m in enumerate(d.pair.motors)]
+        profile=phase_profile(d.pair.segments, planned['phase'],
+            retry_after_oscillation=planned.get('free_retry_after_oscillation', False))
+        fs=follower_settings(d.pair.segments, profile)
+        span=[[round(d.pair._motor_deg(m, math.degrees(p['q_rad'][i]))*100) for p in pts]
+              for i,m in enumerate(d.pair.motors)]
+        previous=[s[0] for s in span]
+        push=planned['phase'] in ('push','push_correction')
         for _, i, _, w in d.a6():
             target=int.from_bytes(w[6:9],'little')
             field=int.from_bytes(w[9:13],'little')
             self.assertLessEqual(field,round(cap*100))
-            self.assertIn(target,nominal[i])
-            self.assertIn(field,fields[i].get(target,set()))
-            axis_step=step[i] if isinstance(step,list) else step
+            if not push or i==0:
+                self.assertEqual(field,round(fs.speed_deg_s[i]*100))
+            self.assertGreaterEqual(target,min(span[i]));self.assertLessEqual(target,max(span[i]))
+            axis_step=min(step[i] if isinstance(step,list) else step, fs.write_step_deg[i])
             self.assertLessEqual(abs(target-previous[i]),math.floor(axis_step*d.pair.motors[i]['ratio']*100+1e-7))
             previous[i]=target
         self.assertEqual(d.pair._settling_bias_centi,[0,0])
@@ -155,7 +152,8 @@ class ExecutionTests(unittest.TestCase):
         self.assert_wires(d,p,10.,[.1,.2])
 
     def test_stuck_path_fails_without_speed_or_angle_recovery(self):
-        pts=[[169.-i*.1,20.] for i in range(11)]
+        # 3 deg: longer than the 1.0 deg maximum lead, so the stall is mid-route.
+        pts=[[169.-i*.1,20.] for i in range(31)]
         p=phase(pts);d=VirtualDrive(model_q=pts[0],settings=settings(),immobile=True)
         with self.assertRaises(HardwareError) as caught:d.run(p)
         self.assertEqual(caught.exception.reason,'motion_no_progress')

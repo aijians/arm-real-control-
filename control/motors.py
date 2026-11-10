@@ -19,7 +19,8 @@ from .trajectory import WaypointCursor, GoalQualification
 from .kinematics import PlanarArm
 from .recovery import SpeedRecovery, recovery_settings
 from .motion_policy import MotionRecovery, motion_policy_settings, angle_bias_profile
-from .segments import segment_settings, phase_profile, axis_cap as segment_axis_cap, stream_speed_deg_s
+from .segments import segment_settings, phase_profile, axis_cap as segment_axis_cap, stream_speed_deg_s, follower_settings
+from .follower import RailFollower
 
 from .protocol import (angle_from_reply, extract_frame, make_frame,
                        position_frame, state_from_reply)
@@ -1051,7 +1052,12 @@ class MotorPair:
         direction = 0 if delta > 0 else 1
         stationary_segment_reversal = bool(command_step_limit_deg is not None
             and stationary_confirmed and last_key is not None
-            and abs(current-last_key[0]/100) <= tolerance_motor_deg+.015*motor["ratio"]+1e-9)
+            and (abs(current-last_key[0]/100) <= tolerance_motor_deg+.015*motor["ratio"]+1e-9
+                 # Held still by load short of its last target, with that target
+                 # on the far side: the drive pulls away from the new target, and
+                 # confirmed stillness bounds travel toward it to the stationary
+                 # margin, so the reversal cannot end up on the wrong side.
+                 or (last_key[0]/100 - current) * delta < 0))
         # A reached route corner can reverse after sustained stationary
         # feedback; it need not resolve a 0.2-degree turn at sub-wire precision.
         # Moving reversals retain the full direction uncertainty budget.
@@ -1268,12 +1274,267 @@ class MotorPair:
         a, b = arm.slider_center(retained, direction), arm.slider_center(command, direction)
         return math.hypot(a[0]-b[0], a[1]-b[1]) <= .1+1e-9
 
+    # Per-cycle follower samples kept in motion diagnostics (50 Hz ~ 80 s).
+    FOLLOW_LOG_MAX = 4000
+
+    def _model_from_motor_deg(self, motor, motor_deg):
+        return (motor_deg - motor["offset_deg"]) / (motor["sign"] * motor["ratio"])
+
+    def _move_follow(self, phase, health_check=None):
+        """D19: execute a segmented phase by rail following.
+
+        RailFollower (control/follower.py) produces each axis's target from
+        the measured progress along the planned rail; the existing A6 gate
+        (_send_targets: direction margin, per-write step limit, dedup), the
+        endpoint qualification, deadlines, halt-on-failure and diagnostics
+        are unchanged. Push/push_correction run master-slave; other phases
+        follow each monotone segment axis by axis.
+        """
+        points = self._validate_phase(phase)
+        trace = _MotionTrace(phase, points, self.config, self.motors)
+        if not self._move_lock.acquire(blocking=False):
+            raise HardwareError("motion_already_running")
+        self._moving = True
+        self._halt_event.clear()
+        self._settling_bias_centi = [0, 0]
+        self._settling_bias_retracted = [False, False]
+        self._stationary_probe = [None, None]
+        self._active_axes = [True, True]
+        self._motion_trace = trace
+        state = target = progress_at = progress_q = None
+        name = phase.get("phase")
+        profile = phase_profile(self.segments, name,
+            retry_after_oscillation=phase.get("free_retry_after_oscillation", False))
+        mode = "push" if name in ("push", "push_correction") else "free"
+        fsettings = follower_settings(self.segments, profile)
+        # Oscillation diagnosis only (tasks.py may slow the *next* Free).
+        recovery = SpeedRecovery({**self.recovery_config, "enabled": False, "settling_enabled": False},
+                                 self.motors, name)
+        sent_count = 0
+        follow_log = deque(maxlen=self.FOLLOW_LOG_MAX)
+        try:
+            state = self._read_state()
+            if any(abs(math.degrees(a-b)) > self.config["angle_tolerance_deg"]
+                   for a, b in zip(state["q_rad"], points[0][1])):
+                raise HardwareError("trajectory_start_mismatch", {"actual_q_rad": state["q_rad"],
+                                                                  "planned_q_rad": points[0][1]})
+            self._active_axes = [len({round(self._motor_deg(motor, math.degrees(q[i]))*100)
+                                      for _, q in points}) > 1
+                                 for i, motor in enumerate(self.motors)]
+            active_indices = [i for i, v in enumerate(self._active_axes) if v]
+            passive_indices = [i for i, v in enumerate(self._active_axes) if not v]
+            path_deg = [[math.degrees(v) for v in q] for _, q in points]
+            follower = RailFollower(path_deg, mode, fsettings)
+            qualifier = GoalQualification(self.config["angle_tolerance_deg"],
+                                          self.config["still_speed_deg_s"],
+                                          self.config["goal_hold_s"], self.config["stable_s"],
+                                          active_axes=self._active_axes)
+            started = time.monotonic()
+            trace.started = started
+            goal = points[-1][1]
+            target = list(points[0][1])
+            written_deg = list(path_deg[0])
+            progress_at, progress_q = [started, started], list(state["q_rad"])
+            passive_anchor = list(state["q_rad"])
+            last_command = last_feedback = last_passive = started - 10
+            stage, stage_started = "tracking", started
+            endpoint_at = endpoint_due = settling_deadline = endpoint_deadline = holding_at = None
+            total_deadline = (started + points[-1][0] + self.config["move_timeout_margin_s"]
+                              + len(points) * self.config["no_progress_s"])
+            out = None
+            # Per-write step anchor: phase start, re-anchored per axis when the
+            # follower reverses that axis at a corner (see RailFollower).
+            step_origin = list(points[0][1])
+            step_since = started
+
+            def commands_ready():
+                for i in active_indices:
+                    key = self._last_targets[i]
+                    if key is None:
+                        if abs(math.degrees(state["q_rad"][i]-goal[i])) > self.config["angle_tolerance_deg"]:
+                            return False
+                        continue
+                    nominal = self._motor_deg(self.motors[i], math.degrees(goal[i]))
+                    if abs(key[0]/100-nominal) > .85*self.config["angle_tolerance_deg"]*self.motors[i]["ratio"]+1e-9:
+                        return False
+                    if state["axis_stamp_monotonic_s"][i] < max(endpoint_at, self._last_target_sent_at[i]):
+                        return False
+                return True
+
+            def record(at):
+                trace.execution.update({
+                    "stage": stage, "stage_elapsed_s": at-stage_started,
+                    "wall_elapsed_s": at-started, "clock": "rail_follower_d19",
+                    "follower_mode": mode, "follower_settings": dict(fsettings.__dict__),
+                    "speed_recovery": recovery.snapshot(),          # disabled; kept for compatibility
+                    "follower": None if out is None else {k: out[k] for k in (
+                        "segment", "segment_count", "progress", "master", "lead_deg",
+                        "lead_limit_deg", "lead_state_deg", "stalled", "speeds_deg_s", "at_end")},
+                    "follower_log": list(follow_log),
+                    "active_axes": list(self._active_axes),
+                    "actual_q_deg": [math.degrees(q) for q in state["q_rad"]],
+                    "actual_speed_deg_s": [math.degrees(v) for v in state["speed_rad_s"]],
+                    "final_goal_errors_deg": [abs(math.degrees(a-b)) for a, b in zip(state["q_rad"], goal)],
+                    "goal_arrived": qualifier.armed, "goal_stable_s": qualifier.stable_s,
+                    "goal_guard_failure": qualifier.failure,
+                    "goal_stability_resets": qualifier.resets,
+                    "goal_speed_blips_tolerated": qualifier.blips_tolerated,
+                    "goal_stability_events": list(qualifier.events),
+                    "active_command_motor_deg": [None if k is None else k[0]/100 for k in self._last_targets],
+                    "active_command_in_acceptance_band": self._active_command_in_acceptance_band(goal),
+                    "active_command_acknowledged": list(self._last_target_acked),
+                    "settling_bias_deg": [0., 0.], "bias_policy": "disabled",
+                    "segment_control": profile,
+                    "endpoint_oscillating_axes": [bool(name == "free" and endpoint_at is not None
+                        and i in active_indices and recovery.oscillating(i)) for i in range(2)],
+                    "endpoint_feedback_ready": bool(endpoint_at is not None and commands_ready()),
+                    "holding_commands_frozen": qualifier.armed,
+                })
+
+            trace.record_stage(stage, started, self._feedback, state, target, 0., progress_at, progress_q)
+            if not active_indices:
+                record(started)
+                return {"status": "completed", "phase": name, "feedback": state,
+                        "motion_commands_sent": 0, "elapsed_s": 0., "no_motion": True,
+                        "motion_diagnostics": _capture_motion_trace(trace, "completed", self._feedback,
+                            state, target, 0., progress_at, progress_q)}
+            while True:
+                if health_check is not None:
+                    health_check()
+                if self._halt_event.is_set():
+                    raise HardwareError("motion_halted")
+                now = time.monotonic()
+                queried = False
+                if now-last_feedback >= 1/self.config["feedback_rate_hz"]:
+                    self._request_feedback(axes=active_indices)
+                    last_feedback, queried = now, True
+                if passive_indices and now-last_passive >= 1/self.config["inactive_feedback_hz"]:
+                    self._request_feedback(axes=passive_indices)
+                    last_passive, queried = now, True
+                self._pump(.006 if queried else 0.)
+                state = self._snapshot()
+                now = time.monotonic()
+                for i in passive_indices:
+                    if abs(math.degrees(state["q_rad"][i]-passive_anchor[i])) > self.config["inactive_drift_deg"]:
+                        raise HardwareError("inactive_axis_drift", {"motor": self.motors[i]["name"]})
+                    if abs(math.degrees(state["speed_rad_s"][i])) > 10*self.config["still_speed_deg_s"]:
+                        raise HardwareError("inactive_axis_moving", {"motor": self.motors[i]["name"]})
+                q_deg = [math.degrees(v) for v in state["q_rad"]]
+                if now-last_command >= 1/self.config["command_rate_hz"] and not qualifier.armed:
+                    out = follower.update(now, q_deg, written_deg, [math.degrees(v) for v in state["speed_rad_s"]])
+                    if out["failure"]:
+                        f = out["failure"]
+                        raise HardwareError("motion_no_progress", {
+                            "motor": self.motors[f["axis"]]["name"], "follower": dict(f),
+                            "tracking_error_deg": abs(q_deg[f["axis"]] - out["targets_deg"][f["axis"]])})
+                    if out["rebased_axes"]:
+                        step_since = now
+                        step_origin = [state["q_rad"][i] if i in out["rebased_axes"]
+                                       else math.radians(written_deg[i]) for i in range(2)]
+                        for i in out["rebased_axes"]:
+                            written_deg[i] = q_deg[i]   # keep the follower anchored until a write lands
+                    command = [math.radians(v) for v in out["targets_deg"]]
+                    for i in passive_indices:
+                        command[i] = points[0][1][i]
+                    fields = list(out["speeds_deg_s"])
+                    previous_writes = list(self._last_target_sent_at)
+                    written = self._send_targets(command, planned_directions=list(follower.dirs),
+                        planned_velocities=None, at_endpoint=out["at_end"], axis_at_endpoint=None,
+                        coalesce_steps=False, tolerances_deg=[self.config["angle_tolerance_deg"]]*2,
+                        command_axes=self._active_axes, allow_bias_axes=[False, False], adaptive_mode=False,
+                        axis_min_speed_deg_s=fields, speed_tiers=[0, 0], command_speed_caps_deg_s=fields,
+                        command_step_limit_deg=list(fsettings.write_step_deg),
+                        segment_origin_q_rad=step_origin, segment_started_at=step_since,
+                        nominal_q_rad=command)
+                    sent_count += written
+                    for i in active_indices:
+                        key = self._last_targets[i]
+                        if key is not None and self._last_target_sent_at[i] > previous_writes[i]:
+                            written_deg[i] = self._model_from_motor_deg(self.motors[i], key[0]/100)
+                            if endpoint_at is not None:
+                                qualifier.reset_after_command()
+                    target = command
+                    last_command = time.monotonic()
+                    follow_log.append({"t": round(now-started, 4), "q": [round(v, 4) for v in q_deg],
+                        "target": [round(v, 4) for v in out["targets_deg"]],
+                        "written": [round(v, 4) for v in written_deg],
+                        "lead": [round(v, 4) for v in out["lead_deg"]],
+                        "lead_state": [round(v, 4) for v in out["lead_state_deg"]],
+                        "segment": out["segment"], "stalled": list(out["stalled"]),
+                        "speed_field": [round(v, 3) for v in fields]})
+                    if out["at_end"] and endpoint_at is None:
+                        endpoint_at = now
+                        endpoint_due = now + 1/self.config["command_rate_hz"]
+                        settling_deadline = endpoint_due + self.config["goal_settle_timeout_s"]
+                        endpoint_deadline = settling_deadline + self.config["goal_hold_s"]
+                if endpoint_due is not None and now >= endpoint_due and stage == "tracking":
+                    stage, stage_started = "settling", now
+                    trace.record_stage(stage, now, self._feedback, state, target, 0., progress_at, progress_q)
+                for i in active_indices:
+                    if abs(math.degrees(state["q_rad"][i]-progress_q[i])) >= self.config["progress_deg"]-1e-9:
+                        progress_at[i], progress_q[i] = now, state["q_rad"][i]
+                if name == "free" and endpoint_due is not None and now >= endpoint_due:
+                    recovery.observe_goal(state, goal)
+                record(time.monotonic())
+                ready = (endpoint_at is not None and now >= endpoint_due and commands_ready()
+                         and all(state["axis_stamp_monotonic_s"][i] >= endpoint_at for i in active_indices))
+                completed = qualifier.observe(state, goal, ready)
+                if qualifier.armed and holding_at is None:
+                    holding_at = time.monotonic()
+                    stage, stage_started = "holding", holding_at
+                    trace.record_stage(stage, holding_at, self._feedback, state, target, 0., progress_at, progress_q)
+                if qualifier.failure:
+                    raise HardwareError(qualifier.failure)
+                if completed:
+                    record(time.monotonic())
+                    return {"status": "completed", "phase": name, "feedback": state,
+                            "motion_commands_sent": sent_count, "elapsed_s": time.monotonic()-started,
+                            "motion_diagnostics": _capture_motion_trace(trace, "completed", self._feedback,
+                                state, target, 0., progress_at, progress_q)}
+                now = time.monotonic()
+                if endpoint_at is not None:
+                    if not qualifier.armed and now >= settling_deadline:
+                        raise HardwareError("motion_goal_settle_timeout")
+                    if qualifier.armed and now >= endpoint_deadline:
+                        raise HardwareError("motion_goal_hold_timeout")
+                elif now >= total_deadline:
+                    raise HardwareError("motion_timeout")
+                # The follower keeps targets within lead_max of the measured
+                # angle; anything far beyond that is a real tracking fault.
+                if any(abs(math.degrees(state["q_rad"][i]-target[i])) > self.config["tracking_abort_deg"]
+                       for i in active_indices):
+                    raise HardwareError("motion_tracking_error")
+                self._pump(min(.01, max(.001, 1/self.config["command_rate_hz"]-(time.monotonic()-last_command))))
+        except BaseException as exc:
+            diagnostics = _capture_motion_trace(trace, "failed", self._feedback, state, target,
+                                                0., progress_at, progress_q)
+            result = self.halt()
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
+            if isinstance(exc, HardwareError):
+                exc.halt_result = result
+                exc.details.setdefault("execution_stage", trace.execution.get("stage"))
+                exc.details["motion_commands_sent"] = sent_count
+                exc.details["phase"] = name
+                exc.details["motion_diagnostics"] = diagnostics
+                raise
+            raise HardwareError("motion_failed", {"error": str(exc), "phase": name,
+                                "motion_diagnostics": diagnostics}, result) from exc
+        finally:
+            self._active_axes = [True, True]
+            self._motion_trace = None
+            self._moving = False
+            self._move_lock.release()
+
     def move(self, phase, health_check=None):
         """Follow preplanned command nodes, then settle and hold the final goal.
 
         Intermediate nodes require proximity and their planned minimum dwell,
         not a complete stop. Passive axes receive no A6 and are queried slowly.
+        Segmented phases use rail following instead (D19, _move_follow).
         """
+        if self.segments["enabled"]:
+            return self._move_follow(phase, health_check)
         points = self._validate_phase(phase)
         trace = _MotionTrace(phase, points, self.config, self.motors)
         if not self._move_lock.acquire(blocking=False):

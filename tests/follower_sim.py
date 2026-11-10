@@ -49,6 +49,8 @@ def simulate(path, mode, lag_fn, settings=None, *, t_max=60., control_dt=.02,
                 elif still_since[i] is None:
                     still_since[i] = t
         out = follower.update(t, fb_q, written, fb_v)
+        for i in out.get("rebased_axes", []):
+            written[i] = fb_q[i]            # MotorPair re-anchors its step check here
         if out["failure"]:
             result = dict(out["failure"], status="failed")
             break

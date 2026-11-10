@@ -148,12 +148,25 @@ class RailFollower:
         self.moving_well = [False, False]
         self.failure = None
         self.last_t = None
+        self.rebased_axes = []          # axes re-anchored at the last segment switch
+        self.last_advance_t = None      # last time any progress advanced (watchdog)
         self._enter_segment()
 
     # ----- rail geometry within the current monotone segment -------------
-    def _enter_segment(self):
+    def _enter_segment(self, q_deg=None):
         a, b = self.segments[self.seg]
+        previous = getattr(self, "dirs", None)
         self.dirs = [_sign(self.path[b][i] - self.path[a][i]) for i in range(2)]
+        # A reversing axis restarts from its *measured* angle: if load held it
+        # short of the corner, stepping the target away from the corner would
+        # produce writes on the wrong side of the arm, which the A6 gate (rightly)
+        # refuses -- a silent livelock. The caller re-anchors its step check too.
+        self.rebased_axes = []
+        if previous is not None and q_deg is not None:
+            for i in range(2):
+                if previous[i] and self.dirs[i] and previous[i] != self.dirs[i]:
+                    self.targets[i] = float(q_deg[i])
+                    self.rebased_axes.append(i)
         self.values = [[self.dirs[i] * self.path[k][i] for k in range(a, b + 1)] for i in range(2)]
         travel = [abs(self.path[b][i] - self.path[a][i]) for i in range(2)]
         self.master = (0 if travel[0] >= travel[1] else 1) if self.mode == "push" else None
@@ -220,18 +233,25 @@ class RailFollower:
         self.last_t = now
         if written_deg is not None:
             self.targets = [t if w is None else float(w) for t, w in zip(self.targets, written_deg)]
+        self.rebased_axes = []          # reported only on the update that switches segment
         # Leave a segment only when every axis reached its end (route corner).
         while self.seg < len(self.segments) - 1:
             b = self.segments[self.seg][1]
             if all(self._corner_reached(i, b, q_deg[i], now) for i in range(2)):
                 self.seg += 1
-                self._enter_segment()
+                self._enter_segment(q_deg)
+                self.last_advance_t = now
             else:
                 break
         a, b = self.segments[self.seg]
         last = self.seg == len(self.segments) - 1
+        if self.last_advance_t is None:
+            self.last_advance_t = now
         for i in range(2):
-            self.progress[i] = max(self.progress[i], self._progress_of(i, q_deg[i]))
+            p = self._progress_of(i, q_deg[i])
+            if p > self.progress[i] + 1e-6:
+                self.last_advance_t = now
+            self.progress[i] = max(self.progress[i], p)
         stalled = [False, False]
         for i in range(2):
             d = self.dirs[i]
@@ -266,6 +286,14 @@ class RailFollower:
                                     "lead_deg": self.lead[i], "remaining_deg": remaining}
             elif not stalled[i]:
                 self.stall_since[i] = None
+        # Watchdog: no progress on any axis and no segment change for twice the
+        # no-progress time means a livelock the per-axis stall test missed.
+        if (self.failure is None and now - self.last_advance_t >= 2 * s.no_progress_s
+                and not (last and all(abs(self.targets[i] - self.path[b][i]) <= 0.006 for i in range(2)))):
+            behind = max(range(2), key=lambda i: abs(self.path[b][i] - q_deg[i]) if self.dirs[i] else -1.)
+            self.failure = {"reason": "motion_no_progress", "axis": behind, "watchdog": True,
+                            "lead_deg": self.lead[behind],
+                            "remaining_deg": abs(self.path[b][behind] - q_deg[behind])}
         desired = list(self.targets)
         lead_eff = [0., 0.]
         for i in range(2):
@@ -325,6 +353,7 @@ class RailFollower:
                 "lead_deg": [self.dirs[i] * (out[i] - q_deg[i]) for i in range(2)],
                 "lead_limit_deg": list(lead_eff), "lead_state_deg": list(self.lead),
                 "stalled": stalled, "failure": self.failure, "at_end": at_end,
+                "rebased_axes": list(self.rebased_axes),
                 "direction_margin_deg": [s.margin(v) for v in self.speeds]}
 
     def _update_slave_speed(self, s_master, master_speed=None, behind_deg=0.):
@@ -358,7 +387,8 @@ class RailFollower:
         if short <= self.settings.corner_tolerance_deg:
             return True
         h = self.history[axis]
-        held = (abs(self.targets[axis] - self.path[b][axis]) <= 1e-9 and h
+        # Written targets come back quantized to the A6 wire (0.01 deg).
+        held = (abs(self.targets[axis] - self.path[b][axis]) <= 0.006 and h
                 and now - h[0][0] >= self.settings.stall_window_s - 1e-9
                 and abs(q - h[0][1]) < self.settings.progress_eps_deg)
         return bool(held and short <= self.settings.lead_max_deg)
