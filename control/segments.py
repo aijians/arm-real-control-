@@ -16,16 +16,6 @@ DEFAULTS = {
     "push_step_increment_deg": 0.2,
     "push_points_per_step": 3,
     "push_max_step_deg": 1.0,
-    # Continuous ("carrot") streaming: each axis's A6 speed field is
-    # stream_speed_ratio * node increment * command rate, so the drive runs
-    # just behind the written target and never catches it. A node may be
-    # released while the arm is within *_max_lead_deg of the current node.
-    "stream_speed_ratio": 0.5,
-    "free_max_lead_deg": 0.5,
-    "push_max_lead_deg": 1.2,
-    # D19 rail follower (control/follower.py) overrides; empty = defaults.
-    "follower": {},
-    "follower_speed_deg_s": 5.0,
 }
 
 
@@ -36,7 +26,7 @@ def segment_settings(hardware):
     result = {**DEFAULTS, **raw}
     if type(result["enabled"]) is not bool:
         raise ValueError("segmented_motion.enabled must be bool")
-    for key in DEFAULTS.keys() - {"enabled", "push_points_per_step", "follower"}:
+    for key in DEFAULTS.keys() - {"enabled", "push_points_per_step"}:
         v = result[key]
         if type(v) not in (int, float) or not math.isfinite(v) or v <= 0:
             raise ValueError("invalid segmented_motion." + key)
@@ -47,12 +37,6 @@ def segment_settings(hardware):
             and 0.05 <= result["push_initial_step_deg"] <= result["push_max_step_deg"] <= 1.2
             and result["push_step_increment_deg"] <= result["push_max_step_deg"]):
         raise ValueError("inconsistent segmented_motion angle steps")
-    if not isinstance(result["follower"], dict):
-        raise ValueError("invalid segmented_motion.follower")
-    follower_settings(result, phase_profile(result, "free"))       # validate early
-    if not (0 < result["stream_speed_ratio"] <= 1
-            and 0.3 <= result["free_max_lead_deg"] <= 1.8 and 0.3 <= result["push_max_lead_deg"] <= 1.8):
-        raise ValueError("invalid segmented_motion streaming settings")
     if (max(result["free_speed_deg_s"], result["push_speed_deg_s"]) > 360
             or (result["enabled"] and max(result["free_speed_deg_s"], result["push_speed_deg_s"])
                 > hardware.get("max_speed_deg_s", 360))):
@@ -71,54 +55,10 @@ def phase_profile(settings, name, *, retry_after_oscillation=False):
         speed = settings["free_retry_speed_deg_s"]
     axis_caps = ([settings["push_max_step_deg"]]*2 if push else
                  [settings["free_upper_max_step_deg"], settings["free_max_step_deg"]])
-    ratio = settings["stream_speed_ratio"]
-    if retry_after_oscillation:
-        ratio *= settings["free_retry_speed_deg_s"] / settings["free_speed_deg_s"]
-    return {"version": 2, "speed_deg_s": speed,
+    return {"version": 1, "speed_deg_s": speed,
             "max_step_deg": max(axis_caps), "axis_max_step_deg": axis_caps,
-            "stream_speed_ratio": ratio,
-            "max_lead_deg": settings["push_max_lead_deg" if push else "free_max_lead_deg"],
             "mode": "progressive_push" if push else "small_step_free",
             "bias_enabled": False, "speed_shifts_enabled": False}
-
-
-def follower_settings(settings, profile):
-    """RailFollower settings for one phase (D19).
-
-    Write steps are the Free-family axis caps for every phase (D19: per-write
-    increment <= 0.1 deg upper / 0.2 deg lower); the speed field is
-    follower_speed_deg_s, capped by the phase speed and scaled down for an
-    oscillation retry exactly like that phase's speed.
-    """
-    from .follower import FollowerSettings
-    extra = dict(settings.get("follower") or {})
-    allowed = set(FollowerSettings.__dataclass_fields__) - {"write_step_deg", "speed_deg_s"}
-    if set(extra) - allowed:
-        raise ValueError("invalid segmented_motion.follower keys: " + ", ".join(sorted(set(extra) - allowed)))
-    push = profile["mode"] == "progressive_push"
-    base = settings["push_speed_deg_s" if push else "free_speed_deg_s"]
-    # Scale once (an oscillation retry slows Free by its own ratio), then cap.
-    speed = min(profile["speed_deg_s"],
-                settings["follower_speed_deg_s"] * (1. if push else profile["speed_deg_s"] / base))
-    steps = (settings["free_upper_max_step_deg"], settings["free_max_step_deg"])
-    return FollowerSettings(write_step_deg=steps, speed_deg_s=(speed, speed), **extra).validate()
-
-
-# Worst feedback age assumed when limiting a streamed speed field.
-STREAM_AGE_S = 0.1
-
-
-def stream_speed_deg_s(profile, increment_deg, command_rate_hz):
-    """A6 speed field for one axis while streaming nodes.
-
-    Slower than the node release rate (ratio < 1), so the drive follows the
-    written target without catching it; and low enough that travel during a
-    worst-case feedback age stays inside the allowed lead, so the next node
-    remains direction-safe without waiting for the arm to stop.
-    """
-    speed = profile["stream_speed_ratio"] * abs(increment_deg) * command_rate_hz
-    speed = min(speed, profile["speed_deg_s"], (profile["max_lead_deg"] - 0.05) / STREAM_AGE_S)
-    return max(0.5, speed)
 
 
 def axis_cap(cap, axis):

@@ -101,8 +101,7 @@ class FreeRetryTests(unittest.TestCase):
         result=d.run(p)
         self.assertEqual(result['status'],'completed')
         self.assertEqual(result['motion_diagnostics']['execution']['segment_control']['speed_deg_s'],5.)
-        # Rail follower field: 5 deg/s normally, halved for the oscillation retry.
-        self.assertEqual([int.from_bytes(w[9:13],'little') for _,_,_,w in d.a6()], [250,250])
+        self.assertEqual([int.from_bytes(w[9:13],'little') for _,_,_,w in d.a6()], [500,500])
         self.assertEqual([int.from_bytes(w[6:9],'little') for _,_,_,w in d.a6()], [16890,16880])
         self.assertEqual(d.pair._settling_bias_centi,[0,0])
 
@@ -119,8 +118,7 @@ class FreeRetryTests(unittest.TestCase):
         e=caught.exception.details['motion_diagnostics']['execution']
         self.assertEqual(e['endpoint_oscillating_axes'],[True,False])
         self.assertEqual(e['settling_bias_deg'],[0,0])
-        # Field never changes during the move (no speed shifts): normal follower field only.
-        self.assertTrue(all(int.from_bytes(w[9:13],'little') == 500 for _,_,_,w in d.a6()))
+        self.assertTrue(all(int.from_bytes(w[9:13],'little') == 1000 for _,_,_,w in d.a6()))
 
     def test_real_move_stationary_endpoint_error_is_not_oscillation(self):
         def stuck(d):

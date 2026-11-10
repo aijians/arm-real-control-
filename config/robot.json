@@ -71,7 +71,7 @@
     "min_speed_deg_s": 2.0,
     "speed_feedforward_gain": 1.15,
     "speed_error_gain_s": 2.5,
-    "goal_hold_s": 1.0,
+    "goal_hold_s": 3.0,
     "goal_settle_timeout_s": 5.0,
     "tracking_lead_deg": 1.8,
     "tracking_abort_deg": 3.5,
@@ -91,12 +91,7 @@
       "push_initial_step_deg": 0.2,
       "push_step_increment_deg": 0.2,
       "push_points_per_step": 3,
-      "push_max_step_deg": 1.0,
-      "stream_speed_ratio": 0.5,
-      "free_max_lead_deg": 0.5,
-      "push_max_lead_deg": 1.2,
-      "follower_speed_deg_s": 10.0,
-      "follower": {}
+      "push_max_step_deg": 1.0
     }
   },
   "verification": {

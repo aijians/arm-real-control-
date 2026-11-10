@@ -1,6 +1,5 @@
 """Discrete execution and qualification of an already planned joint path."""
 import bisect
-from collections import deque
 import math
 
 
@@ -21,9 +20,7 @@ class WaypointCursor:
     """
 
     def __init__(self, points, tolerance_ratio=0.5, command_interval_s=0.02, *,
-                 zero_span_tolerance_deg=0.3, quantization_tolerance_deg=0.005,
-                 lead_tolerance_deg=None, require_fresh_feedback=True,
-                 follow_planned_time=True):
+                 zero_span_tolerance_deg=0.3, quantization_tolerance_deg=0.005):
         if not points:
             raise ValueError("waypoint path is empty")
         self.num_axes = len(points[0][1])
@@ -60,26 +57,6 @@ class WaypointCursor:
         self.index = 0
         self.selected_at = None
         self.last_feedback_stamp = None
-        # Streaming: an intermediate node may be released while the arm is
-        # still up to lead_tolerance_deg from the current node, except where
-        # that axis reverses (a route corner must actually be reached).
-        self.lead_tolerance_deg = (None if lead_tolerance_deg is None
-                                   else float(lead_tolerance_deg))
-        if self.lead_tolerance_deg is not None and (
-                not math.isfinite(self.lead_tolerance_deg) or self.lead_tolerance_deg <= 0):
-            raise ValueError("lead tolerance must be positive")
-        self.require_fresh_feedback = bool(require_fresh_feedback)
-        # When streaming, the A6 speed fields pace the motion; the planned
-        # clock would otherwise make the arm reach each node and wait.
-        self.follow_planned_time = bool(follow_planned_time)
-        self.reversal_nodes = [[False]*self.num_axes for _ in self.points]
-        for axis in range(self.num_axes):
-            signs = [0 if abs(b[1][axis]-a[1][axis]) <= 1e-12 else (1 if b[1][axis] > a[1][axis] else -1)
-                     for a, b in zip(self.points, self.points[1:])]
-            for node in range(1, len(self.points)-1):
-                before = next((s for s in reversed(signs[:node]) if s), 0)
-                after = next((s for s in signs[node:] if s), 0)
-                self.reversal_nodes[node][axis] = before * after < 0
 
     @property
     def elapsed(self):
@@ -98,8 +75,6 @@ class WaypointCursor:
     def minimum_interval_s(self):
         if self.index == 0:
             return 0.0
-        if not self.follow_planned_time:
-            return self.interval
         return max(self.interval, self.times[self.index] - self.times[self.index - 1])
 
     @property
@@ -112,16 +87,6 @@ class WaypointCursor:
                     self.tolerance_ratio * abs(math.degrees(b - a)))
                 if abs(b - a) > 1e-12 else self.zero_span_tolerance_deg
                 for a, b in zip(previous, current)]
-
-    @property
-    def advance_tolerances_deg(self):
-        """Proximity required before releasing the next node."""
-        base = self.tolerances_deg
-        if self.lead_tolerance_deg is None or self.index == 0:
-            return base
-        return [tol if self.reversal_nodes[self.index][axis]
-                else max(tol, self.lead_tolerance_deg)
-                for axis, tol in enumerate(base)]
 
     def target(self):
         return list(self.points[self.index][1])
@@ -165,17 +130,15 @@ class WaypointCursor:
         if self.selected_at is None:
             self.selected_at = now
         if self.last_feedback_stamp is not None and stamp <= self.last_feedback_stamp:
-            if self.require_fresh_feedback:
-                return False
-        else:
-            self.last_feedback_stamp = stamp
+            return False
+        self.last_feedback_stamp = stamp
         if self.at_endpoint:
             return False
         if now - self.selected_at < self.minimum_interval_s - 1e-9:
             return False
         if any(active and abs(math.degrees(q - a)) > tolerance + 1e-9
                for q, a, tolerance, active in
-               zip(self.target(), actual, self.advance_tolerances_deg, self.active_axes)):
+               zip(self.target(), actual, self.tolerances_deg, self.active_axes)):
             return False
         self.index += 1
         self.selected_at = now
@@ -310,8 +273,7 @@ class GoalQualification:
     """
     def __init__(self, tolerance_deg, still_deg_s, stable_s, arrival_s=0.3,
                  *, hard_error_deg=None, hard_speed_deg_s=None,
-                 unstable_window_s=0.5, unstable_samples=3, active_axes=None,
-                 steady_angle_deg=0.05, tolerate_speed_blip=True):
+                 unstable_window_s=0.5, unstable_samples=3, active_axes=None):
         self.tolerance = tolerance_deg
         self.still = still_deg_s
         self.required = stable_s
@@ -331,29 +293,9 @@ class GoalQualification:
         self.violation_samples = 0
         self.failure = None
         self.active_axes = None if active_axes is None else tuple(bool(a) for a in active_axes)
-        # An isolated integer speed reading (e.g. 0 -> 2 -> 0 deg/s) while
-        # the angles stay in tolerance and steady does not discard the
-        # accumulated stable time; a second distinct over-speed speed sample,
-        # an angle shift or an error outside tolerance still resets it.
-        self.steady_angle_deg = float(steady_angle_deg)
-        self.tolerate_speed_blip = bool(tolerate_speed_blip)
-        self.reference_q = None          # angles of the last qualifying sample
-        self.blip_speed_stamps = {}      # axis -> speed stamp of a tolerated over-speed sample
-        self.blips_tolerated = 0
-        self.events = deque(maxlen=128)  # every reset / tolerated blip, with its sample
-
-    def _event(self, kind, reason, stamp, errors, speeds, changes):
-        self.events.append({"kind": kind, "reason": reason, "stamp_monotonic_s": stamp,
-                            "errors_deg": errors, "speeds_deg_s": speeds,
-                            "angle_change_deg": changes, "armed": self.armed,
-                            "stable_s_before": self.stable_s})
 
     def reset_after_command(self):
         """A new actual speed command invalidates earlier stability evidence."""
-        if self.since is not None or self.armed:
-            self._event("reset", "new_command", self.last_stamp, None, None, None)
-        self.reference_q = None
-        self.blip_speed_stamps = {}
         self.armed = False
         self.since = self.last_stamp = None
         self.stable_s = 0.
@@ -380,52 +322,12 @@ class GoalQualification:
                   for a, b, enabled in zip(state['q_rad'], goal, active) if enabled]
         speeds = [abs(math.degrees(v))
                   for v, enabled in zip(state['speed_rad_s'], active) if enabled]
-        errors_ok = at_endpoint and all(e <= self.tolerance + 1e-9 for e in errors)
-        qualifies = errors_ok and all(v <= self.still + 1e-9 for v in speeds)
-        indices = [i for i, enabled in enumerate(active) if enabled]
-        q_deg = [math.degrees(state['q_rad'][i]) for i in indices]
-        changes = (None if self.reference_q is None else
-                   [abs(a - b) for a, b in zip(q_deg, self.reference_q)])
-        speed_stamps = state.get('speed_stamp_monotonic_s')
-        if not qualifies and self.since is not None and self.tolerate_speed_blip:
-            over = [i for i, v in zip(indices, speeds) if v > self.still + 1e-9]
-            steady = changes is not None and all(c < self.steady_angle_deg for c in changes)
-            blip = (errors_ok and steady and over and speed_stamps is not None
-                    and all(v < self.hard_speed_deg_s - 1e-9 for v in speeds))
-            if blip:
-                repeated = [i for i in over if i in self.blip_speed_stamps
-                            and speed_stamps[i] != self.blip_speed_stamps[i]]
-                if not repeated:
-                    new = [i for i in over if i not in self.blip_speed_stamps]
-                    for i in new:
-                        self.blip_speed_stamps[i] = speed_stamps[i]
-                    if new:
-                        self.blips_tolerated += 1
-                        self._event("tolerated_speed_blip", "isolated_speed_sample", stamp,
-                                    errors, speeds, changes)
-                    if fresh:
-                        self.last_stamp = stamp
-                    return False
-                reason = "consecutive_overspeed"
-            elif not errors_ok:
-                reason = "angle_error_out_of_tolerance" if at_endpoint else "not_at_endpoint"
-            elif not steady:
-                reason = "angle_shift" if changes is not None else "overspeed_without_reference"
-            else:
-                reason = "overspeed"
-            self._event("reset", reason, stamp, errors, speeds, changes)
-        elif not qualifies and self.since is not None:
-            self._event("reset", "angle_error_out_of_tolerance" if not errors_ok else "overspeed",
-                        stamp, errors, speeds, changes)
-        if qualifies:
-            # Speeds are back at rest: a later over-speed sample is isolated again.
-            self.blip_speed_stamps = {}
-            self.reference_q = q_deg
+        qualifies = (at_endpoint
+                     and all(e <= self.tolerance + 1e-9 for e in errors)
+                     and all(v <= self.still + 1e-9 for v in speeds))
         # Evaluate even when only one of four feedback stamps has changed.
         # This prevents a fast speed reply from being hidden by an older angle.
         if not qualifies:
-            self.reference_q = None
-            self.blip_speed_stamps = {}
             self.resets += self.since is not None
             self.since = None
             self.stable_s = 0.0
