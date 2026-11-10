@@ -234,6 +234,8 @@ class TaskRunner:
                                error_type=type(exc).__name__,
                                details=getattr(exc, "details", {}), stop=self.motors.halt())
                 record["reason"] = str(exc)
+                if getattr(exc, "details", {}).get("controller") == "free_timed":
+                    return record, None
                 # The current move already used its finite speed-recovery
                 # budget. Replaying a whole leg must not restart that budget.
                 if (getattr(exc, "details", {}).get("recovery_exhausted")

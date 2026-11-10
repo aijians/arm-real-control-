@@ -338,6 +338,14 @@ class MotorPair:
         self.config = dict(self.DEFAULTS, **hardware_config)
         self.recovery_config = recovery_settings(self.config)
         self.motion_policy = motion_policy_settings(self.config)
+        timed = self.config.get("free_timed_motion", {})
+        if not isinstance(timed, dict) or type(timed.get("enabled", False)) is not bool:
+            raise ValueError("invalid free_timed_motion.enabled")
+        self.free_timed = timed.get("enabled", False)
+        self.free_timed_speed = _finite(timed.get("speed_deg_s", 10.),
+                                        "free_timed_motion.speed_deg_s")
+        if not 0 < self.free_timed_speed <= self.config["max_speed_deg_s"]:
+            raise ValueError("invalid free_timed_motion.speed_deg_s")
         self.motors = [dict(m) for m in self.config["motors"]]
         if len(self.motors) != 2:
             raise ValueError("Exactly two motors are required")
@@ -1081,12 +1089,199 @@ class MotorPair:
         a, b = arm.slider_center(retained, direction), arm.slider_center(command, direction)
         return math.hypot(a[0]-b[0], a[1]-b[1]) <= .1+1e-9
 
+    def _send_free_timed_target(self, q_rad, trace):
+        """Write a nominal target once. Feedback only selects a safe A6 direction."""
+        sent = 0
+        with self._io_lock:
+            for i, (motor, port, q) in enumerate(zip(self.motors, self.ports, q_rad)):
+                if self._halt_event.is_set():
+                    raise HardwareError("motion_halted")
+                target = round(self._motor_deg(motor, math.degrees(q)) * 100)
+                previous = self._last_targets[i]
+                if previous is not None and previous[0] == target:
+                    continue
+                # A6 has an explicit direction. Never send an ambiguous target:
+                # refresh once, then fail rather than wait for waypoint arrival.
+                for attempt in range(2):
+                    reply = self._feedback[i]
+                    now = time.monotonic()
+                    age = max(0., now - reply["angle_query_stamp"])
+                    delay = max(0., port._next_send_at - now)
+                    speed_bound = max(self.free_timed_speed, abs(reply["speed_deg_s"]),
+                                      previous[2]/100 if previous else self.config["max_speed_deg_s"])
+                    margin = speed_bound * (age + delay + 14*10/self.config["baudrate"]) + .015
+                    delta = target / 100 - reply["motor_deg"]
+                    if abs(delta) > margin:
+                        break
+                    if attempt == 0:
+                        # Angle-only refresh avoids the extra state-query round
+                        # trip consuming the small target's direction margin.
+                        time.sleep(max(0., port._next_send_at-time.monotonic()))
+                        since = time.monotonic()
+                        self._request_feedback(axes=[i], include_speed=False)
+                        while self._feedback[i]["angle_query_stamp"] < since:
+                            if self._halt_event.is_set():
+                                raise HardwareError("motion_halted")
+                            if time.monotonic()-since >= self.config["feedback_timeout_s"]:
+                                raise HardwareError("joint_feedback_stale", {"motor": motor["name"]})
+                            self._pump(.001)
+                        self._snapshot()  # Fresh angle must still satisfy joint limits.
+                event = {"motor": motor["name"], "decision_monotonic_s": time.monotonic(),
+                         "target_motor_deg": target/100, "nominal_target_motor_deg": target/100,
+                         "speed_limit_deg_s": self.free_timed_speed,
+                         "direction_uncertainty_deg": margin, "bias_motor_deg": 0.}
+                if abs(delta) <= margin:
+                    # Quantized equality is not a move. Only retain a known
+                    # existing target in the final acceptance band.
+                    if abs(delta) <= .02 and (previous is None or abs(previous[0]-target) <= 2):
+                        trace.record_action({**event, "status": "skipped", "reason": "already_at_target"})
+                        continue
+                    raise HardwareError("free_timed_direction_ambiguous", {
+                        "motor": motor["name"], "delta_motor_deg": delta,
+                        "direction_margin_deg": margin})
+                direction = 0 if delta > 0 else 1
+                speed = max(1, round(self.free_timed_speed * 100))
+                wire = position_frame(motor["id"], direction, target, speed)
+                event.update(direction=direction, tx_hex=wire.hex(" "))
+                try:
+                    port.send(wire, cancel_event=self._halt_event)
+                except BaseException:
+                    trace.record_action({**event, "status": "send_failed"})
+                    raise
+                self._last_targets[i] = (target, direction, speed)
+                self._last_target_sent_at[i] = time.monotonic()
+                self._last_target_acked[i] = False
+                trace.record_action({**event, "status": "sent",
+                                     "write_completed_monotonic_s": time.monotonic()})
+                sent += 1
+        return sent
+
+    def _move_free_timed(self, phase, health_check=None):
+        """Send every Free waypoint by its absolute planned time; qualify only the end."""
+        points = self._validate_phase(phase)
+        trace = _MotionTrace(phase, points, self.config, self.motors)
+        if not self._move_lock.acquire(blocking=False):
+            raise HardwareError("motion_already_running")
+        self._moving = True
+        self._halt_event.clear()
+        self._active_axes = [True, True]
+        self._settling_bias_centi = [0, 0]
+        self._settling_bias_retracted = [False, False]
+        self._stationary_probe = [None, None]
+        self._motion_trace = trace
+        state = target = elapsed = None
+        sent_count = 0
+        samples, schedule = deque(maxlen=10000), []
+        sample_count = 0
+        trace.execution.update(controller="free_timed", stage="tracking",
+                               fixed_speed_deg_s=self.free_timed_speed,
+                               automatic_retry=False, schedule=schedule)
+        try:
+            state = self._read_state()
+            if any(abs(math.degrees(a-b)) > self.config["angle_tolerance_deg"]
+                   for a, b in zip(state["q_rad"], points[0][1])):
+                raise HardwareError("trajectory_start_mismatch")
+            started = time.monotonic()
+            trace.started = started
+            target, elapsed = points[0][1], 0.
+            index = 1
+            next_feedback = started
+            last_sample_stamp = None
+            last_write = started - 1/self.config["command_rate_hz"]
+            end_at = None
+            qualifier = GoalQualification(self.config["angle_tolerance_deg"],
+                self.config["still_speed_deg_s"], self.config["goal_hold_s"], self.config["stable_s"])
+            deadline = started + points[-1][0] + self.config["move_timeout_margin_s"]
+            while True:
+                if self._halt_event.is_set():
+                    raise HardwareError("motion_halted")
+                if health_check is not None:
+                    health_check()
+                now = time.monotonic()
+                if now >= next_feedback:
+                    self._request_feedback()
+                    next_feedback = time.monotonic() + 1/self.config["feedback_rate_hz"]
+                self._pump(0)
+                state = self._snapshot()
+                if state["stamp_monotonic_s"] != last_sample_stamp:
+                    samples.append({"elapsed_s": time.monotonic()-started,
+                        "axis_stamp_monotonic_s": list(state["axis_stamp_monotonic_s"]),
+                        "q_deg": [math.degrees(q) for q in state["q_rad"]],
+                        "speed_deg_s": [math.degrees(v) for v in state["speed_rad_s"]],
+                        "output_raw": [r.get("current_raw") for r in self._feedback]})
+                    sample_count += 1
+                    last_sample_stamp = state["stamp_monotonic_s"]
+                now = time.monotonic()
+                if index < len(points) and now >= deadline:
+                    raise HardwareError("free_timed_schedule_timeout")
+                # No measured error, progress, speed, or acknowledgement gates
+                # advancement. Late nodes stay ordered; never burst or drop them.
+                if (index < len(points) and now-started >= points[index][0]
+                        and now-last_write >= 1/self.config["command_rate_hz"]):
+                    elapsed, target = points[index]
+                    written = self._send_free_timed_target(target, trace)
+                    sent_count += written
+                    last_write = time.monotonic()
+                    schedule.append({"index": index, "planned_time_s": elapsed,
+                        "write_completed_elapsed_s": last_write-started,
+                        "lateness_s": last_write-started-elapsed, "axes_written": written})
+                    index += 1
+                trace.execution.update(next_waypoint_index=index,
+                    waypoints_dispatched=len(schedule), motion_commands_sent=sent_count)
+                if index == len(points):
+                    if end_at is None:
+                        end_at = time.monotonic()
+                        target, elapsed = points[-1][1], points[-1][0]
+                        trace.execution.update(stage="settling", dispatch_completed_elapsed_s=end_at-started)
+                    state = self._snapshot()
+                    ready = all(t >= end_at for t in state["axis_stamp_monotonic_s"])
+                    if qualifier.observe(state, target, ready):
+                        trace.execution.update(stage="holding", goal_stable_s=qualifier.stable_s)
+                        trace.execution.update(feedback_samples=list(samples),
+                            dropped_feedback_samples=sample_count-len(samples))
+                        return {"status": "completed", "phase": "free", "feedback": state,
+                            "motion_commands_sent": sent_count, "elapsed_s": time.monotonic()-started,
+                            "motion_diagnostics": _capture_motion_trace(trace, "completed",
+                                self._feedback, state, target, elapsed, None, None)}
+                    if qualifier.failure:
+                        raise HardwareError(qualifier.failure)
+                    if qualifier.armed:
+                        trace.execution["stage"] = "holding"
+                    if not qualifier.armed and time.monotonic() >= end_at + self.config["goal_settle_timeout_s"]:
+                        raise HardwareError("motion_goal_settle_timeout")
+                    if time.monotonic() >= end_at + self.config["goal_settle_timeout_s"] + self.config["goal_hold_s"]:
+                        raise HardwareError("motion_goal_hold_timeout" if qualifier.armed
+                                            else "motion_goal_settle_timeout")
+                self._pump(.005)
+        except BaseException as exc:
+            trace.execution.update(feedback_samples=list(samples),
+                dropped_feedback_samples=sample_count-len(samples))
+            diagnostics = _capture_motion_trace(trace, "failed", self._feedback,
+                                                state, target, elapsed, None, None)
+            stop = self.halt()
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
+            details = {"phase": "free", "controller": "free_timed", "automatic_retry": False,
+                       "motion_commands_sent": sent_count, "motion_diagnostics": diagnostics}
+            if isinstance(exc, HardwareError):
+                exc.details.update(details)
+                exc.halt_result = stop
+                raise
+            raise HardwareError("motion_failed", {**details, "error": str(exc)}, stop) from exc
+        finally:
+            self._motion_trace = None
+            self._active_axes = [True, True]
+            self._moving = False
+            self._move_lock.release()
+
     def move(self, phase, health_check=None):
         """Follow preplanned command nodes, then settle and hold the final goal.
 
-        Intermediate nodes require proximity and their planned minimum dwell,
-        not a complete stop. Passive axes receive no A6 and are queried slowly.
+        Free uses the timed baseline when configured. Other phases retain
+        their existing feedback-driven executor.
         """
+        if phase.get("phase") == "free" and self.free_timed:
+            return self._move_free_timed(phase, health_check)
         points = self._validate_phase(phase)
         trace = _MotionTrace(phase, points, self.config, self.motors)
         if not self._move_lock.acquire(blocking=False):

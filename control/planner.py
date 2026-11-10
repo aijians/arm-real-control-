@@ -227,7 +227,9 @@ class Planner:
         points, source_indices = self._command_points(
             name, points, metadata.get("direction", "+x"), _collision_context)
         recovery_geometry = None
-        policy_enabled = self.config.get("hardware",{}).get("motion_recovery",{}).get("enabled",False)
+        hardware = self.config.get("hardware", {})
+        policy_enabled = (hardware.get("motion_recovery", {}).get("enabled", False)
+                          and not (name == "free" and hardware.get("free_timed_motion", {}).get("enabled", False)))
         if policy_enabled and _collision_context is not None:
             positions, contact = _collision_context
             recovery_geometry = {"scene": copy.deepcopy(self.scene.config),

@@ -1,3 +1,15 @@
+## Free 定时发送基线（2026-11-10）
+
+当前 `hardware.free_timed_motion.enabled=true`。Free 包括自由进场及通过 Planner.free 生成的返回路线，直接使用途经点已有的 `time_s`：P0 只核对起点，P1 在 time_s[1] 发送，以此类推，最后发终点。中途不等待到位、不按反馈误差调整速度或目标、不做无进展恢复、偏置、重发、领先量或主从控制。A6 速度字段固定为 `free_timed_motion.speed_deg_s=10`（电机轴 °/s）。不改原规划节点与时间。
+
+反馈继续按配置查询并记录，用于失联、关节限位和 A6 方向保护；途中误差不作为节点推进或停机条件。由于 A6 必须指定转动方向，发包前仍用角度反馈判断方向；接近目标时至多刷新一次角度，方向仍不明确则报 `free_timed_direction_ambiguous` 并停止，不等待节点到位、不绕过方向保护。此处不保证发令硬实时，日志记录每点计划时间、实际写完时间和迟到量。迟到时按序续发，至少间隔一个 command_rate_hz 周期，不突发追赶、不跳点；调度超过原计划时长加 move_timeout_margin_s 则失败。
+
+全部节点处理完后，才用新反馈验收终点：两轴误差≤0.3°、速度≤1°/s，稳定0.3秒后继续保持3秒；5秒内不能进入保持或保持超时则失败。到终点后不再发补偿/重发。Free 失败在任务层直接结束，不自动重跑整段。记录 `motion_diagnostics.execution.controller=free_timed`、`schedule`、`feedback_samples` 及采样截断数；保留旧 action 末256条的诊断格式。
+
+Push、撤离等其它阶段暂沿用原执行器。旧恢复模块仍为这些阶段与历史测试提供支持，不在 Free 入口运行。轨迹规划、offset、视觉标定和 PID 没有调整。本版尚未进行实机运动验证。
+
+离线验证：`PYTHONPATH=.:tests python3 -m unittest discover -s tests -p test_free_timed.py -v`。旧版完整测试集的已知失败见交接记录，不能把虚拟回放写成实机通过。
+
 ## 2026-11-06 当前恢复策略
 
 所有实际 move 阶段、两轴和两个方向共用恢复策略：先识别卡住或目标附近往复，再调速度，仍无效才调临时角目标。
