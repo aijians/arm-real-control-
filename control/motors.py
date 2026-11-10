@@ -1098,7 +1098,7 @@ class MotorPair:
         a, b = arm.slider_center(retained, direction), arm.slider_center(command, direction)
         return math.hypot(a[0]-b[0], a[1]-b[1]) <= .1+1e-9
 
-    def _send_free_timed_target(self, q_rad, trace):
+    def _send_timed_target(self, q_rad, trace):
         """Write both absolute A4 targets, without consulting tracking feedback."""
         sent = 0
         with self._io_lock:
@@ -1128,11 +1128,13 @@ class MotorPair:
                 sent += 1
         return sent
 
-    def _move_free_timed(self, phase, health_check=None):
+    def _move_timed(self, phase, health_check=None):
         """Send small A4 targets at a fixed period; qualify only the end."""
         points = timed_free_points(self._validate_phase(phase),
                                    self.free_timed_step, self.free_timed_period)
         trace = _MotionTrace(phase, points, self.config, self.motors)
+        name = phase["phase"]
+        controller = name + "_timed"
         if not self._move_lock.acquire(blocking=False):
             raise HardwareError("motion_already_running")
         self._moving = True
@@ -1146,7 +1148,7 @@ class MotorPair:
         sent_count = 0
         samples, schedule = deque(maxlen=10000), []
         sample_count = 0
-        trace.execution.update(controller="free_timed", stage="tracking",
+        trace.execution.update(controller=controller, stage="tracking",
                                position_command="0xa4",
                                fixed_speed_deg_s=self.free_timed_speed,
                                max_step_deg=self.free_timed_step,
@@ -1191,14 +1193,14 @@ class MotorPair:
                     last_sample_stamp = state["stamp_monotonic_s"]
                 now = time.monotonic()
                 if index < len(points) and now >= deadline:
-                    raise HardwareError("free_timed_schedule_timeout")
+                    raise HardwareError(controller + "_schedule_timeout")
                 # No measured error, progress, speed, or acknowledgement gates
                 # advancement. Late nodes stay ordered; never burst or drop them.
                 if (index < len(points) and now-started >= points[index][0]
                         and now-last_write >= dispatch_period):
                     elapsed, target = points[index]
                     last_write = time.monotonic()
-                    written = self._send_free_timed_target(target, trace)
+                    written = self._send_timed_target(target, trace)
                     sent_count += written
                     completed = time.monotonic()
                     schedule.append({"index": index, "planned_time_s": elapsed,
@@ -1224,7 +1226,7 @@ class MotorPair:
                         trace.execution.update(stage="holding", goal_stable_s=qualifier.stable_s)
                         trace.execution.update(feedback_samples=list(samples),
                             dropped_feedback_samples=sample_count-len(samples))
-                        return {"status": "completed", "phase": "free", "feedback": state,
+                        return {"status": "completed", "phase": name, "feedback": state,
                             "motion_commands_sent": sent_count, "elapsed_s": time.monotonic()-started,
                             "motion_diagnostics": _capture_motion_trace(trace, "completed",
                                 self._feedback, state, target, elapsed, None, None)}
@@ -1250,7 +1252,7 @@ class MotorPair:
             stop = self.halt()
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise
-            details = {"phase": "free", "controller": "free_timed", "automatic_retry": False,
+            details = {"phase": name, "controller": controller, "automatic_retry": False,
                        "motion_commands_sent": sent_count, "motion_diagnostics": diagnostics}
             if isinstance(exc, HardwareError):
                 exc.details.update(details)
@@ -1266,11 +1268,11 @@ class MotorPair:
     def move(self, phase, health_check=None):
         """Follow preplanned command nodes, then settle and hold the final goal.
 
-        Free uses the timed baseline when configured. Other phases retain
-        their existing feedback-driven executor.
+        Free and Push use the same timed baseline when configured.
+        Other phases retain their existing feedback-driven executor.
         """
-        if phase.get("phase") == "free" and self.free_timed:
-            return self._move_free_timed(phase, health_check)
+        if phase.get("phase") in ("free", "push", "push_correction") and self.free_timed:
+            return self._move_timed(phase, health_check)
         points = self._validate_phase(phase)
         trace = _MotionTrace(phase, points, self.config, self.motors)
         if not self._move_lock.acquire(blocking=False):

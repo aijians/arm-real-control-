@@ -136,8 +136,51 @@ class TimedFreeTests(unittest.TestCase):
 
     def test_other_phase_keeps_existing_executor(self):
         d = VirtualDrive(settings=settings())
-        result = d.run(phase([[159, 20], [158, 21]], name="push"))
+        result = d.run(phase([[159, 20], [158, 21]], name="withdraw"))
         self.assertNotEqual(result["motion_diagnostics"]["execution"].get("controller"), "free_timed")
+
+    def test_push_and_correction_send_a4_and_report_their_actual_phase(self):
+        for name in ("push", "push_correction"):
+            with self.subTest(phase=name):
+                d = VirtualDrive(settings=settings())
+                with patch.object(d.pair, "_send_targets", side_effect=AssertionError("legacy sender")):
+                    result = d.run(phase([[159, 20], [158, 21]], name=name))
+                self.assertEqual(result["phase"], name)
+                self.assertEqual(result["motion_diagnostics"]["execution"]["controller"], name+"_timed")
+                self.assertEqual(len(d.a4()), 10)
+                self.assertEqual(d.a6(), [])
+                self.assertEqual(targets(d)[-1], 158.)
+
+    def test_push_tracking_error_does_not_gate_waypoints_but_final_goal_still_fails(self):
+        for name in ("push", "push_correction"):
+            with self.subTest(phase=name):
+                d = VirtualDrive(immobile=True, settings=settings(no_progress_s=.1))
+                with self.assertRaises(m.HardwareError) as caught:
+                    d.run(phase([[159, 20], [153, 23]], name=name))
+                self.assertEqual(caught.exception.reason, "motion_goal_settle_timeout")
+                self.assertEqual(caught.exception.details["phase"], name)
+                self.assertEqual(caught.exception.details["controller"], name+"_timed")
+                self.assertEqual(len(d.a4()), 60)
+                self.assertEqual(targets(d)[-1], 153.)
+                self.assertEqual(targets(d, 1)[-1], 23.)
+                self.assertEqual(len(d.halts), 1)
+
+    def test_push_planner_uses_same_small_step_fixed_period_without_recovery_geometry(self):
+        from pathlib import Path
+        from control.config import load_config
+        from control.planner import Planner
+        root = Path(__file__).resolve().parents[1]
+        cfg, _ = load_config(root)
+        planner = Planner(root, cfg)
+        path = [list(map(math.radians, q)) for q in [[159, 20], [158, 21]]]
+        for name in ("push", "push_correction"):
+            with self.subTest(phase=name):
+                planned = planner._phase(name, path, [1.], 1., direction="+x")
+                self.assertEqual(planned["time_parameterization"], "fixed_period_on_joint_polyline")
+                self.assertIsNone(planned["motion_recovery_geometry"])
+                self.assertEqual(len(planned["points"]), 6)
+                self.assertEqual(planned["points"][-1]["q_rad"], path[-1])
+                self.assertEqual(planned["points"][-1]["time_s"], .25)
 
     def test_noop_path_qualifies_without_motion(self):
         d = VirtualDrive(settings=settings())

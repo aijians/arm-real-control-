@@ -231,7 +231,7 @@ class Planner:
         hardware = self.config.get("hardware", {})
         timed = hardware.get("free_timed_motion", {})
         timing = "quintic_progress_on_joint_polyline"
-        if name == "free" and timed.get("enabled", False):
+        if name in ("free", "push", "push_correction") and timed.get("enabled", False):
             try:
                 points = [{"time_s": t, "q_rad": q} for t, q in timed_free_points(
                     [(p["time_s"], p["q_rad"]) for p in points],
@@ -241,7 +241,8 @@ class Planner:
             source_indices = None  # Subdivided nodes are between source vertices.
             timing = "fixed_period_on_joint_polyline"
         policy_enabled = (hardware.get("motion_recovery", {}).get("enabled", False)
-                          and not (name == "free" and hardware.get("free_timed_motion", {}).get("enabled", False)))
+                          and not (name in ("free", "push", "push_correction")
+                                   and timed.get("enabled", False)))
         if policy_enabled and _collision_context is not None:
             positions, contact = _collision_context
             recovery_geometry = {"scene": copy.deepcopy(self.scene.config),
