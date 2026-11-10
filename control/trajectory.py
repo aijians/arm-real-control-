@@ -1,5 +1,6 @@
 """Discrete execution and qualification of an already planned joint path."""
 import bisect
+from collections import deque
 import math
 
 
@@ -288,14 +289,15 @@ class FeedbackClock:
 
 
 class GoalQualification:
-    """Require a continuous interval of new, strictly qualifying feedback.
+    """Qualify endpoint feedback, retaining time across an isolated speed blip.
 
-    An isolated bad sample resets qualification; it does not itself stop a
-    motor. Stale feedback, limits, tracking guards and deadlines are separate.
+    Only an in-band, steady angle may tolerate one distinct speed sample.
+    Persistent speed violations and angle violations still reset qualification.
     """
     def __init__(self, tolerance_deg, still_deg_s, stable_s, arrival_s=0.3,
                  *, hard_error_deg=None, hard_speed_deg_s=None,
-                 unstable_window_s=0.5, unstable_samples=3, active_axes=None):
+                 unstable_window_s=0.5, unstable_samples=3, active_axes=None,
+                 steady_angle_deg=0.05, tolerate_speed_blip=True):
         self.tolerance = tolerance_deg
         self.still = still_deg_s
         self.required = stable_s
@@ -315,9 +317,29 @@ class GoalQualification:
         self.violation_samples = 0
         self.failure = None
         self.active_axes = None if active_axes is None else tuple(bool(a) for a in active_axes)
+        # An isolated integer speed reading (e.g. 0 -> 2 -> 0 deg/s) while
+        # the angles stay in tolerance and steady does not discard the
+        # accumulated stable time; a second distinct over-speed speed sample,
+        # an angle shift or an error outside tolerance still resets it.
+        self.steady_angle_deg = float(steady_angle_deg)
+        self.tolerate_speed_blip = bool(tolerate_speed_blip)
+        self.reference_q = None          # angles of the last qualifying sample
+        self.blip_speed_stamps = {}      # axis -> speed stamp of a tolerated over-speed sample
+        self.blips_tolerated = 0
+        self.events = deque(maxlen=128)  # every reset / tolerated blip, with its sample
+
+    def _event(self, kind, reason, stamp, errors, speeds, changes):
+        self.events.append({"kind": kind, "reason": reason, "stamp_monotonic_s": stamp,
+                            "errors_deg": errors, "speeds_deg_s": speeds,
+                            "angle_change_deg": changes, "armed": self.armed,
+                            "stable_s_before": self.stable_s})
 
     def reset_after_command(self):
         """A new actual speed command invalidates earlier stability evidence."""
+        if self.since is not None or self.armed:
+            self._event("reset", "new_command", self.last_stamp, None, None, None)
+        self.reference_q = None
+        self.blip_speed_stamps = {}
         self.armed = False
         self.since = self.last_stamp = None
         self.stable_s = 0.
@@ -344,12 +366,52 @@ class GoalQualification:
                   for a, b, enabled in zip(state['q_rad'], goal, active) if enabled]
         speeds = [abs(math.degrees(v))
                   for v, enabled in zip(state['speed_rad_s'], active) if enabled]
-        qualifies = (at_endpoint
-                     and all(e <= self.tolerance + 1e-9 for e in errors)
-                     and all(v <= self.still + 1e-9 for v in speeds))
+        errors_ok = at_endpoint and all(e <= self.tolerance + 1e-9 for e in errors)
+        qualifies = errors_ok and all(v <= self.still + 1e-9 for v in speeds)
+        indices = [i for i, enabled in enumerate(active) if enabled]
+        q_deg = [math.degrees(state['q_rad'][i]) for i in indices]
+        changes = (None if self.reference_q is None else
+                   [abs(a - b) for a, b in zip(q_deg, self.reference_q)])
+        speed_stamps = state.get('speed_stamp_monotonic_s')
+        if not qualifies and self.since is not None and self.tolerate_speed_blip:
+            over = [i for i, v in zip(indices, speeds) if v > self.still + 1e-9]
+            steady = changes is not None and all(c < self.steady_angle_deg for c in changes)
+            blip = (errors_ok and steady and over and speed_stamps is not None
+                    and all(v < self.hard_speed_deg_s - 1e-9 for v in speeds))
+            if blip:
+                repeated = [i for i in over if i in self.blip_speed_stamps
+                            and speed_stamps[i] != self.blip_speed_stamps[i]]
+                if not repeated:
+                    new = [i for i in over if i not in self.blip_speed_stamps]
+                    for i in new:
+                        self.blip_speed_stamps[i] = speed_stamps[i]
+                    if new:
+                        self.blips_tolerated += 1
+                        self._event("tolerated_speed_blip", "isolated_speed_sample", stamp,
+                                    errors, speeds, changes)
+                    if fresh:
+                        self.last_stamp = stamp
+                    return False
+                reason = "consecutive_overspeed"
+            elif not errors_ok:
+                reason = "angle_error_out_of_tolerance" if at_endpoint else "not_at_endpoint"
+            elif not steady:
+                reason = "angle_shift" if changes is not None else "overspeed_without_reference"
+            else:
+                reason = "overspeed"
+            self._event("reset", reason, stamp, errors, speeds, changes)
+        elif not qualifies and self.since is not None:
+            self._event("reset", "angle_error_out_of_tolerance" if not errors_ok else "overspeed",
+                        stamp, errors, speeds, changes)
+        if qualifies:
+            # Speeds are back at rest: a later over-speed sample is isolated again.
+            self.blip_speed_stamps = {}
+            self.reference_q = q_deg
         # Evaluate even when only one of four feedback stamps has changed.
         # This prevents a fast speed reply from being hidden by an older angle.
         if not qualifies:
+            self.reference_q = None
+            self.blip_speed_stamps = {}
             self.resets += self.since is not None
             self.since = None
             self.stable_s = 0.0

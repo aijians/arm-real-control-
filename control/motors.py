@@ -534,7 +534,7 @@ class MotorPair:
 
     def _snapshot(self, since=None):
         now = time.monotonic()
-        angles, speeds, motor_angles, axis_stamps = [], [], [], []
+        angles, speeds, motor_angles, axis_stamps, speed_stamps = [], [], [], [], []
         for i, (motor, reply) in enumerate(zip(self.motors, self._feedback)):
             timeout = (self.config["feedback_timeout_s"] if since is not None or self._active_axes[i]
                        else max(self.config["inactive_feedback_timeout_s"],
@@ -555,9 +555,11 @@ class MotorPair:
             angles.append(math.radians(angle))
             speeds.append(math.radians(reply["speed_deg_s"] / scale))
             axis_stamps.append(min(reply["angle_stamp"], reply["speed_stamp"]))
+            speed_stamps.append(reply["speed_stamp"])
         selected = [stamp for stamp, active in zip(axis_stamps, self._active_axes) if active]
         return {"q_rad": angles, "speed_rad_s": speeds, "motor_deg": motor_angles,
                 "axis_stamp_monotonic_s": axis_stamps,
+                "speed_stamp_monotonic_s": speed_stamps,
                 "stamp_monotonic_s": min(selected or axis_stamps)}
 
     def _read_state(self, timeout_s=None):
@@ -1181,6 +1183,7 @@ class MotorPair:
                 if state["stamp_monotonic_s"] != last_sample_stamp:
                     samples.append({"elapsed_s": time.monotonic()-started,
                         "axis_stamp_monotonic_s": list(state["axis_stamp_monotonic_s"]),
+                        "speed_stamp_monotonic_s": list(state["speed_stamp_monotonic_s"]),
                         "q_deg": [math.degrees(q) for q in state["q_rad"]],
                         "speed_deg_s": [math.degrees(v) for v in state["speed_rad_s"]],
                         "output_raw": [r.get("current_raw") for r in self._feedback]})
@@ -1212,7 +1215,12 @@ class MotorPair:
                         trace.execution.update(stage="settling", dispatch_completed_elapsed_s=end_at-started)
                     state = self._snapshot()
                     ready = all(t >= end_at for t in state["axis_stamp_monotonic_s"])
-                    if qualifier.observe(state, target, ready):
+                    completed = qualifier.observe(state, target, ready)
+                    trace.execution.update(goal_stable_s=qualifier.stable_s,
+                        goal_stability_resets=qualifier.resets,
+                        goal_speed_blips_tolerated=qualifier.blips_tolerated,
+                        goal_stability_events=list(qualifier.events))
+                    if completed:
                         trace.execution.update(stage="holding", goal_stable_s=qualifier.stable_s)
                         trace.execution.update(feedback_samples=list(samples),
                             dropped_feedback_samples=sample_count-len(samples))
@@ -1392,6 +1400,9 @@ class MotorPair:
                     "final_goal_errors_deg": errors,
                     "goal_arrived": qualifier.armed, "goal_stable_s": qualifier.stable_s,
                     "goal_guard_failure": qualifier.failure,
+                    "goal_stability_resets": qualifier.resets,
+                    "goal_speed_blips_tolerated": qualifier.blips_tolerated,
+                    "goal_stability_events": list(qualifier.events),
                     "active_command_motor_deg": [None if k is None else k[0]/100 for k in self._last_targets],
                     "active_command_in_acceptance_band": self._active_command_in_acceptance_band(points[-1][1]),
                     "active_command_acknowledged": list(self._last_target_acked),
