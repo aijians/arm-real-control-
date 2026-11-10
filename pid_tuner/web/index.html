@@ -4,18 +4,18 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
-  <title>大臂 PID 调参台</title>
+  <title>机械臂 PID 调参台</title>
   <link rel="stylesheet" href="/style.css">
   <script src="/app.js" defer></script>
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="/" aria-label="大臂 PID 调参台"><span class="brand-mark" aria-hidden="true">∿</span><span>ARM <b>CONTROL</b><small>RS485 · PARAMETER WORKBENCH</small></span></a>
-    <div class="topbar-right"><span class="station-tag">大臂 · 单电机调试</span><span id="mode-badge" class="badge muted">等待服务</span><span class="connection-pill"><i id="connection-dot"></i><span id="connection-label">未连接</span></span></div>
+    <a class="brand" href="/" aria-label="机械臂 PID 调参台"><span class="brand-mark" aria-hidden="true">∿</span><span>ARM <b>CONTROL</b><small>RS485 · PARAMETER WORKBENCH</small></span></a>
+    <div class="topbar-right"><span id="axis-tag" class="station-tag">等待关节信息</span><span id="mode-badge" class="badge muted">等待服务</span><span class="connection-pill"><i id="connection-dot"></i><span id="connection-label">未连接</span></span></div>
   </header>
   <main>
     <section class="page-heading">
-      <div><p class="eyebrow">MOTOR TUNING / 调参工作台</p><h1>大臂 PID 参数调节</h1><p class="page-description">读取、调整、验证。每一次修改都有据可查。</p></div>
+      <div><p class="eyebrow">MOTOR TUNING / 调参工作台</p><h1 id="axis-heading">PID 参数调节</h1><p class="page-description">读取、调整、验证。每一次修改都有据可查。</p></div>
       <div class="heading-actions"><div class="export-session"><button id="export-json" class="button ghost" title="下载参数、反馈、事件记录与失败诊断">↓ 会话 JSON</button><span class="subtle">包含失败诊断</span></div><button id="export-csv" class="button ghost">↓ 反馈 CSV</button></div>
     </section>
     <div id="mode-notice" class="notice demo-notice" role="status"><span class="notice-icon">i</span><div><strong id="mode-notice-title">正在连接调参服务</strong><span id="mode-notice-text">程序在开发板运行，浏览器显示电机参数与实时反馈。</span></div><span id="session-label" class="session-label">SESSION —</span></div>
@@ -72,13 +72,13 @@
             </div>
             <p id="speed-write-summary" class="subtle" hidden></p><p id="speed-write-error" class="subtle" hidden></p><details id="speed-write-details" class="diagnostics-step" hidden><summary>最近一次 RAM 写入详情</summary><pre id="speed-write-evidence"></pre></details><div class="loop-footer"><span id="speed-draft" class="draft-state">读取后可编辑</span><div><button class="button compact ghost restore" data-loop="speed" disabled>恢复备份</button><button class="button compact secondary save" data-loop="speed" disabled>保存 ROM</button><button class="button compact primary write" data-loop="speed" disabled>写入 RAM</button></div></div>
           </article>
-          <details class="reference-panel"><summary>调参参考 <span>仅填入表单，不会下发</span></summary><p>大臂实测起点：角度 50/0/0，速度 300/10/0。先保持角度环与速度 Ki=10 不变，逐次比较速度 Kp=350 / 400 / 450。每次只改一个量，出现抖动立即停止并退回。</p><div class="reference-actions"><button class="button compact secondary preset" data-kp="350">参考 A · Kp 350</button><button class="button compact secondary preset" data-kp="400">参考 B · Kp 400</button><button class="button compact secondary preset" data-kp="450">参考 C · Kp 450</button></div><p class="subtle">保留当前 Kd。先读回参数并备份；PID 不能单独证明输出扭矩不足。</p></details>
+          <details id="upper-reference" class="reference-panel" hidden><summary>调参参考 <span>仅填入表单，不会下发</span></summary><p>大臂实测起点：角度 50/0/0，速度 300/10/0。先保持角度环与速度 Ki=10 不变，逐次比较速度 Kp=350 / 400 / 450。每次只改一个量，出现抖动立即停止并退回。</p><div class="reference-actions"><button class="button compact secondary preset" data-kp="350">参考 A · Kp 350</button><button class="button compact secondary preset" data-kp="400">参考 B · Kp 400</button><button class="button compact secondary preset" data-kp="450">参考 C · Kp 450</button></div><p class="subtle">保留当前 Kd。先读回参数并备份；PID 不能单独证明输出扭矩不足。</p></details>
           <details class="readonly-panel"><summary>其他驱动参数 <span>只读</span></summary><div class="readonly-grid"><div><span class="label">电流环 PID</span><strong id="current-pid">—</strong></div><div><span class="label">MS 输出限制 raw</span><strong id="torque-limit">—</strong></div><div><span class="label">MS 输出反馈 raw</span><strong id="iq-raw">—</strong></div></div><p class="subtle">本机 MS4005 的输出为功率控制原始量，不是扭矩电流；限制实测 850，不换算为 A、W 或 N·m，也不在本界面提高限制。</p><pre id="raw-values">等待读取原始参数</pre></details>
         </section>
 
         <section class="card motion-card">
           <div class="card-heading"><div><p class="eyebrow">SINGLE MOVE</p><h2>单次小幅试转</h2></div><span id="motion-status" class="badge muted">待机</span></div>
-          <p class="motion-hint">先支撑大臂、清空行程。到位后连续验证 3 秒，通过后持续保持原目标，可直接输入下一角度。每个新目标重新验证，不发送返回起点指令。</p><p id="ram-ack-notice" class="motion-hint" hidden>RAM 写入已收到成功应答，运行参数未独立读回。试转需人工触发；先用当前位置附近 2° 小幅验证，观察抖动、温升与输出后再决定是否保存。</p>
+          <p class="motion-hint">先支撑所选关节、清空行程。到位后连续验证 3 秒，通过后持续保持原目标，可直接输入下一角度。每个新目标重新验证，不发送返回起点指令。</p><p id="ram-ack-notice" class="motion-hint" hidden>RAM 写入已收到成功应答，运行参数未独立读回。试转需人工触发；先用当前位置附近 2° 小幅验证，观察抖动、温升与输出后再决定是否保存。</p>
           <div class="motion-inputs"><label>目标位置 <span>° · 绝对角度</span><div class="input-unit"><input id="move-target" type="number" step="0.1" inputmode="decimal" placeholder="先读取位置" disabled><button id="use-current" title="填入当前反馈角度" disabled>取当前位置</button></div></label><label>试转速度 <span>°/s</span><input id="move-speed" type="number" min="0.1" max="60" step="0.1" value="18" inputmode="decimal" disabled></label></div>
           <div class="motion-boundary" id="motion-limits">单次位移 ≤ 10° · 速度 ≤ 60°/s</div>
           <div class="motion-actions"><button id="enable" class="button secondary" disabled>使能电机</button><button id="move" class="button primary" disabled>▶ 试转并保持观察</button><button id="stop" class="button stop" disabled><span aria-hidden="true">■</span> 停止电机</button></div>

@@ -1,3 +1,9 @@
+## PID 控制台关节选择
+
+小臂：`bash run_pid_tuner.sh --axis lower --real --pause-sal --host 0.0.0.0 --port 8765`。
+大臂：将 `--axis lower` 改为 `--axis upper`；省略 `--axis` 时默认大臂。
+按配置的关节名称选择串口、ID、安装映射和限位，小臂为 `/dev/ttyS4`、ID2。网页及导出记录显示所选关节。`--device`/`--motor-id` 仅覆盖选中轴；`--pause-sal` 仅针对选中串口。先退出主控制程序；真实模式在网页点击连接前不打开电机串口。启动后使用终端打印的完整带令牌链接访问。
+
 ## Free 多圈绝对位置定时基线（2026-11-10）
 
 当前 `hardware.free_timed_motion.enabled=true`。Free 包括自由进场及通过 Planner.free 生成的返回路线，沿原关节折线细分，每轴相邻模型目标最多 `max_step_deg=0.2°`，每个后继点间隔 `period_s=0.05` 秒。保留原路径顶点、拐点及最终目标，重新生成时间；没有额外的 2°/秒路段速度限制。P0 只核对起点，之后每组向两轴各发送一条 A4 多圈绝对位置命令，驱动速度字段固定为 `speed_deg_s=10`（电机轴 °/s）。

@@ -27,6 +27,7 @@
   const number = value => typeof value === 'number' && Number.isFinite(value);
   const fmt = (value, digits = 2) => number(value) ? value.toFixed(digits) : '—';
   const nameOf = loop => loop === 'angle' ? '角度环' : '速度环';
+  const axisLabel = () => state?.connection?.axis_label || '所选关节';
   const vendorSettings = () => state?.save_scope === 'all_settings';
   const draftReference = loop => vendorSettings() ? state?.ram_ack_values?.[loop] || state?.params?.[loop] : state?.params?.[loop];
   const pidText = values => gains.map(gain => `${gain.toUpperCase()}=${values?.[gain] ?? '—'}`).join('，');
@@ -412,11 +413,15 @@
       }
     }
     const demo = state.mode === 'demo';
+    document.title = `${axisLabel()} PID 调参台`;
+    $('axis-heading').textContent = `${axisLabel()} PID 参数调节`;
+    $('axis-tag').textContent = `${axisLabel()} · 单电机调试`;
+    $('upper-reference').hidden = state.connection?.axis !== 'upper';
     $('mode-badge').textContent = demo ? 'DEMO 模拟模式' : state.mode === 'real' ? '实机模式' : '未知模式';
     $('mode-badge').className = `badge ${demo ? 'demo' : 'real'}`;
     $('mode-notice').className = `notice ${demo ? 'demo-notice' : 'real-notice'}`;
     $('mode-notice-title').textContent = demo ? '模拟演示 · 未连接真实硬件' : '实机调参 · 操作会下发到电机';
-    $('mode-notice-text').textContent = demo ? '曲线与参数均为模拟数据。实机模式请通过开发板启动参数选择。' : vendorSettings() ? '整组设置读回与 RAM 写入应答分别记录；应答不等于运行值读回。修改表单后需手动下发。' : '支撑大臂后再使能。修改表单不会下发，需手动写入 RAM。';
+    $('mode-notice-text').textContent = demo ? '曲线与参数均为模拟数据。实机模式请通过开发板启动参数选择。' : vendorSettings() ? '整组设置读回与 RAM 写入应答分别记录；应答不等于运行值读回。修改表单后需手动下发。' : '支撑所选关节后再使能。修改表单不会下发，需手动写入 RAM。';
     $('session-label').textContent = `SESSION ${String(state.session_id || '—').slice(0, 8).toUpperCase()}`;
     $('device-value').textContent = state.connection?.device || (demo ? '模拟 RS485' : '—');
     $('motor-id').textContent = state.connection?.motor_id ?? '—';
@@ -619,11 +624,11 @@
           return;
         }
         const both = loops.map(l => `${nameOf(l)}（${state.ram_ack_values?.[l] ? '本会话 RAM 已应答目标' : '整组设置读回'}）：${pidText(expected[l])}`).join('\n');
-        if (!await confirmAction('保存整组设置到 ROM？', `将以下两环目标写入整组保存数据：\n${both}\n服务端从最新整组设置快照保留其他字段，叠加本会话已应答目标，再发送整组保存。表单中尚未下发的修改不参与保存；未知参数变化会阻止保存。\nRAM 成功应答不等于运行值已读回，请先人工小幅试转。保存命令成功应答及整组设置核对一致，仍不能证明断电持久；需手动重新上电后核验。重上电前停止并支撑大臂。`, '确认保存整组 ROM')) return;
+        if (!await confirmAction('保存整组设置到 ROM？', `将以下两环目标写入整组保存数据：\n${both}\n服务端从最新整组设置快照保留其他字段，叠加本会话已应答目标，再发送整组保存。表单中尚未下发的修改不参与保存；未知参数变化会阻止保存。\nRAM 成功应答不等于运行值已读回，请先人工小幅试转。保存命令成功应答及整组设置核对一致，仍不能证明断电持久；需手动重新上电后核验。重上电前停止并支撑所选关节。`, '确认保存整组 ROM')) return;
         await runAction(button, '/api/save', {loop, confirm: 'SAVE_ALL_ROM', expected}, '整组保存命令已应答且设置读回一致；断电持久性尚待手动重新上电核验。');
         return;
       }
-      if (!await confirmAction(`保存${nameOf(loop)}到 ROM？`, `将已读回验证的 RAM 参数发送给 ROM 保存指令：\n${details}${dirtyNote}\n请先完成小幅试转验证。ROM 指令应答不代表已核验断电持久性。\n本手册未给重启指令；按型号需要手动重上电后读回核验持久性。重上电前请停止并支撑大臂。`, '确认保存 ROM')) return;
+      if (!await confirmAction(`保存${nameOf(loop)}到 ROM？`, `将已读回验证的 RAM 参数发送给 ROM 保存指令：\n${details}${dirtyNote}\n请先完成小幅试转验证。ROM 指令应答不代表已核验断电持久性。\n本手册未给重启指令；按型号需要手动重上电后读回核验持久性。重上电前请停止并支撑所选关节。`, '确认保存 ROM')) return;
       await runAction(button, '/api/save', {loop, confirm: 'SAVE_ROM'}, `${nameOf(loop)} ROM 保存指令已收到应答。`);
     });
     document.querySelector(`.restore[data-loop="${loop}"]`).addEventListener('click', async event => {
@@ -632,13 +637,14 @@
       if (!baseline) return;
       const details = gains.map(gain => `${gain.toUpperCase()} = ${baseline[gain]}`).join('，');
       const note = vendorSettings() ? '将连接时整组设置快照中的 PID 重新下发 RAM；该快照不是独立读取的原运行 RAM。成功应答仍不代表运行值已读回。' : '将本次连接时保存的参数写回 RAM。';
-      if (!await confirmAction(`恢复${nameOf(loop)}连接备份？`, `${note}\n${details}\n请确认大臂已支撑且当前无运动。恢复不自动保存 ROM。`, '重新下发到 RAM')) return;
+      if (!await confirmAction(`恢复${nameOf(loop)}连接备份？`, `${note}\n${details}\n请确认所选关节已支撑且当前无运动。恢复不自动保存 ROM。`, '重新下发到 RAM')) return;
       await runAction(button, '/api/restore', {loop}, vendorSettings() ? `${nameOf(loop)}连接快照中的 PID 已重新下发并收到应答；运行值未独立读回。` : `${nameOf(loop)}已恢复本次连接备份到 RAM。`, () => { drafts[loop].dirty = false; });
     });
   }
 
   for (const button of document.querySelectorAll('.preset')) {
     button.addEventListener('click', () => {
+      if (state?.connection?.axis !== 'upper') return;
       $('angle-kp').value = 50;
       $('angle-ki').value = 0;
       $('speed-kp').value = button.dataset.kp;
@@ -654,7 +660,7 @@
   $('diagnose').addEventListener('click', event => runAction(event.currentTarget, '/api/diagnose', {}, '只读诊断已完成。请查看逐项结果，可下载会话 JSON。'));
   $('enable').addEventListener('click', async event => {
     const button = event.currentTarget;
-    if (!await confirmAction('使能大臂电机？', '使能后电机会输出保持力，可能产生运动。\n确认大臂已支撑、行程已清空，物理急停可用。', '确认使能')) return;
+    if (!await confirmAction(`使能${axisLabel()}电机？`, '使能后电机会输出保持力，可能产生运动。\n确认所选关节已支撑、行程已清空，物理急停可用。', '确认使能')) return;
     await runAction(button, '/api/enable', {confirm:'ENABLE_MOTOR'}, '电机使能指令已确认。');
   });
   $('move-target').addEventListener('input', () => { targetEdited = true; });
@@ -678,7 +684,7 @@
     const button = event.currentTarget;
     const nextAngle = state?.motion?.active && state.motion.phase === 'holding' && state.motion.trial_outcome === 'passed';
     const transition = nextAngle ? '当前保持不中途停止，直接前往新目标；服务端会用最新实测角度重新检查单次位移与限位。\n' : '';
-    if (!await confirmAction(nextAngle ? '前往下一角度？' : '试转并持续保持目标？', `${transition}从当前反馈 ${fmt(state?.latest?.angle_deg)}° 前往 ${target}°，速度上限 ${speed}°/s。\n每个目标到位后连续 3 秒满足误差 ±0.2°、速度 ≤1°/s 才显示验证成功，未通过验证的阶段最多 30 秒。通过后持续保持，不按 30 秒停止；可再输入下一角度。\n手动停止、断开连接、保持失败、故障或浏览器心跳中断 3 秒后会尝试停止；停止后保持输出可能解除，机械臂可能回位。请先支撑大臂、清空行程，并留在页面观察。`, nextAngle ? '确认前往下一角度' : '确认试转并保持')) return;
+    if (!await confirmAction(nextAngle ? '前往下一角度？' : '试转并持续保持目标？', `${transition}从当前反馈 ${fmt(state?.latest?.angle_deg)}° 前往 ${target}°，速度上限 ${speed}°/s。\n每个目标到位后连续 3 秒满足误差 ±0.2°、速度 ≤1°/s 才显示验证成功，未通过验证的阶段最多 30 秒。通过后持续保持，不按 30 秒停止；可再输入下一角度。\n手动停止、断开连接、保持失败、故障或浏览器心跳中断 3 秒后会尝试停止；停止后保持输出可能解除，机械臂可能回位。请先支撑所选关节、清空行程，并留在页面观察。`, nextAngle ? '确认前往下一角度' : '确认试转并保持')) return;
     await runAction(button, '/api/move', {target_deg: target, speed_deg_s: speed}, `已提交${nextAngle ? '下一角度' : '试转'}：目标 ${target}°，速度 ${speed}°/s；到位后重新验证 3 秒，通过后持续保持。`);
   });
   $('stop').addEventListener('click', event => runAction(event.currentTarget, '/api/stop', {}, '停止指令已确认；保持输出可能解除，注意机械臂回位。停止不会擦除本次试验结果。'));
