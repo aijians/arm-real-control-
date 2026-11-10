@@ -42,7 +42,8 @@ class VirtualDrive:
     def __init__(self, model_q=(159., 20.), settings=None, *, ack=True,
                  immobile=False, start_friction_deg=0., query_loss=None,
                  disturbance=None, lost_targets=0, fail_write=None,
-                 breakaway_once=False, load_model=None):
+                 breakaway_once=False, load_model=None, ignore_while_moving=False,
+                 drop_acked=None):
         self.pair = m.MotorPair(settings or config())
         self.now = 1000.
         self.origin = self.now
@@ -65,6 +66,11 @@ class VirtualDrive:
         # needs before it moves at that angle (static friction + gravity). The
         # axis holds while |target - q| <= lag and otherwise tracks target - lag.
         self.load_model = load_model
+        # Hypothesis from run 20d2710a: the drive replies to an A6 that arrives
+        # while it is moving but does not adopt the new target.
+        self.ignore_while_moving = ignore_while_moving
+        self.drop_acked = drop_acked
+        self.ignored_targets = []
         self.frames = []
         self.pending_acks = []
         self.halts = []
@@ -140,6 +146,12 @@ class VirtualDrive:
         port._next_send_at = self.now + .005
         if command in (0x94, 0x9C):
             self.refresh(axis, command)
+        elif command == 0x9A:
+            # Read-only state 1: healthy drive unless a test sets drive_error_state.
+            err = getattr(self, "drive_error_state", 0)
+            self.pair._feedback[axis]["status1"] = {
+                "temperature_c": 30, "voltage_v": 12.1, "bus_current_a": 0.0, "motor_state": 0,
+                "error_state": err, "error_flags": ["stall"] if err & 64 else [], "stamp": self.now}
         elif command == 0xA6:
             target = int.from_bytes(wire[6:9], "little") / 100.
             direction = wire[5]
@@ -149,6 +161,17 @@ class VirtualDrive:
                                                target, direction))
             if self.lost_targets:
                 self.lost_targets -= 1
+                return
+            if self.drop_acked is not None and self.drop_acked(axis, target):
+                # Acknowledged but not adopted (the A6 reply proves arrival only).
+                self.ignored_targets.append((self.elapsed, axis, target))
+                if self.ack:
+                    self.pending_acks.append(axis)
+                return
+            if self.ignore_while_moving and abs(self.velocity[axis]) > 1e-9:
+                self.ignored_targets.append((self.elapsed, axis, target))
+                if self.ack:
+                    self.pending_acks.append(axis)
                 return
             self.target[axis] = target
             self.command_speed[axis] = int.from_bytes(wire[9:13], "little") / 100.

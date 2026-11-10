@@ -22,6 +22,7 @@ from .motion_policy import MotionRecovery, motion_policy_settings, angle_bias_pr
 from .segments import segment_settings, phase_profile, axis_cap as segment_axis_cap, stream_speed_deg_s, follower_settings
 from .follower import RailFollower
 
+from .protocol import status1_from_reply
 from .protocol import (angle_from_reply, extract_frame, make_frame,
                        position_frame, state_from_reply)
 
@@ -465,6 +466,14 @@ class MotorPair:
                     if self._motion_trace is not None:
                         self._motion_trace.record_query(motor, command, time.monotonic())
 
+    def _request_status(self, axes):
+        """Read-only 0x9A query (voltage, motor state, error bits) for diagnostics."""
+        with self._io_lock:
+            for i in axes:
+                self.ports[i].send(make_frame(0x9A, self.motors[i]["id"]))
+                if self._motion_trace is not None:
+                    self._motion_trace.record_query(self.motors[i], 0x9A, time.monotonic())
+
     def _pump(self, timeout_s=0):
         with self._io_lock:
             if not self._opened:
@@ -509,6 +518,8 @@ class MotorPair:
                                     motor_deg=angle, angle_stamp=now,
                                     angle_query_stamp=(now if query_at is None or query_at > now
                                                        else query_at))
+                            elif frame.command == 0x9A:
+                                self._feedback[i]["status1"] = dict(status1_from_reply(frame), stamp=now)
                             elif frame.command in (0x9C, 0xA6):
                                 state = state_from_reply(frame)
                                 self._feedback[i].update(state, speed_stamp=now)
@@ -829,7 +840,8 @@ class MotorPair:
                         speed_tiers=None, command_speed_caps_deg_s=None,
                         recovery_bias_modes=None, recovery_validator=None, adaptive_mode=False,
                         stuck_upshift_axes=None, stuck_angle_boost_axes=None, nominal_retry_axes=None, nominal_return_axes=None,
-                        command_step_limit_deg=None, segment_origin_q_rad=None, segment_started_at=None):
+                        command_step_limit_deg=None, segment_origin_q_rad=None, segment_started_at=None,
+                        force_resend_axes=None):
         self._prepare_skip_reason = None
         motor, port = self.motors[i], self.ports[i]
         current = self._feedback[i]["motor_deg"]
@@ -1217,8 +1229,17 @@ class MotorPair:
             # A6 direction. Only a discrete tier transition may update
             # an acknowledged target once; raw speed rounding is ignored.
             same_direction_tier_change = tier_changed and direction == last_key[1]
+            # D19 stall resend: the drive may not act on A6 targets that arrive
+            # while it is moving (run 20d2710a: 1 deg target error, holding
+            # current, no motion). The caller asks to repeat the *same* target
+            # and direction once the axis is confirmed still; the normal
+            # direction margin above still applies.
+            forced_resend = bool(force_resend_axes is not None and force_resend_axes[i]
+                                 and direction == last_key[1] and stationary_confirmed
+                                 and abs(delta) > uncertainty)
             if ((direction != last_key[1] and not stationary_nominal_return)
-                    or not (stalled_unacked or same_direction_tier_change or stationary_nominal_retry or stationary_nominal_return)):
+                    or not (stalled_unacked or same_direction_tier_change or stationary_nominal_retry
+                            or stationary_nominal_return or forced_resend)):
                 if trace is not None:
                     trace.record_action({**event, "status": "skipped",
                                          "reason": "unchanged_active_target"})
@@ -1342,6 +1363,11 @@ class MotorPair:
             total_deadline = (started + points[-1][0] + self.config["move_timeout_margin_s"]
                               + len(points) * self.config["no_progress_s"])
             out = None
+            resend_interval_s = 0.3
+            status_interval_s = 0.5
+            last_status = None
+            last_resend = [-1e9, -1e9]
+            stall_resends = [0, 0]
             # Per-write step anchor: phase start, re-anchored per axis when the
             # follower reverses that axis at a corner (see RailFollower).
             step_origin = list(points[0][1])
@@ -1367,6 +1393,8 @@ class MotorPair:
                     "wall_elapsed_s": at-started, "clock": "rail_follower_d19",
                     "follower_mode": mode, "follower_settings": dict(fsettings.__dict__),
                     "speed_recovery": recovery.snapshot(),          # disabled; kept for compatibility
+                    "stall_resends": list(stall_resends),
+                    "drive_status1": [self._feedback[i].get("status1") for i in range(2)],
                     "follower": None if out is None else {k: out[k] for k in (
                         "segment", "segment_count", "progress", "master", "lead_deg",
                         "lead_limit_deg", "lead_state_deg", "stalled", "speeds_deg_s", "at_end")},
@@ -1411,6 +1439,9 @@ class MotorPair:
                 if passive_indices and now-last_passive >= 1/self.config["inactive_feedback_hz"]:
                     self._request_feedback(axes=passive_indices)
                     last_passive, queried = now, True
+                if last_status is None or now-last_status >= status_interval_s:
+                    self._request_status(active_indices)       # diagnostics only
+                    last_status, queried = now, True
                 self._pump(.006 if queried else 0.)
                 state = self._snapshot()
                 now = time.monotonic()
@@ -1438,6 +1469,9 @@ class MotorPair:
                         command[i] = points[0][1][i]
                     fields = list(out["speeds_deg_s"])
                     previous_writes = list(self._last_target_sent_at)
+                    force = [bool(out["stalled"][i]
+                                  and now - max(previous_writes[i], last_resend[i]) >= resend_interval_s)
+                             for i in range(2)]
                     written = self._send_targets(command, planned_directions=list(follower.dirs),
                         planned_velocities=None, at_endpoint=out["at_end"], axis_at_endpoint=None,
                         coalesce_steps=False, tolerances_deg=[self.config["angle_tolerance_deg"]]*2,
@@ -1445,8 +1479,14 @@ class MotorPair:
                         axis_min_speed_deg_s=fields, speed_tiers=[0, 0], command_speed_caps_deg_s=fields,
                         command_step_limit_deg=list(fsettings.write_step_deg),
                         segment_origin_q_rad=step_origin, segment_started_at=step_since,
-                        nominal_q_rad=command)
+                        nominal_q_rad=command, force_resend_axes=force)
                     sent_count += written
+                    resent = [bool(force[i] and self._last_target_sent_at[i] > previous_writes[i])
+                              for i in range(2)]
+                    for i in range(2):
+                        if resent[i]:
+                            last_resend[i] = now
+                            stall_resends[i] += 1
                     for i in active_indices:
                         key = self._last_targets[i]
                         if key is not None and self._last_target_sent_at[i] > previous_writes[i]:
@@ -1461,7 +1501,16 @@ class MotorPair:
                         "lead": [round(v, 4) for v in out["lead_deg"]],
                         "lead_state": [round(v, 4) for v in out["lead_state_deg"]],
                         "segment": out["segment"], "stalled": list(out["stalled"]),
-                        "speed_field": [round(v, 3) for v in fields]})
+                        "speed_field": [round(v, 3) for v in fields],
+                        "resent": resent,
+                        # Latest drive status reply (0x9C/0xA6): is it actually pushing?
+                        "drive": [{"current_raw": self._feedback[i].get("current_raw"),
+                                   "speed_deg_s": self._feedback[i].get("speed_deg_s"),
+                                   "encoder_raw": self._feedback[i].get("encoder_raw"),
+                                   "status1": self._feedback[i].get("status1"),
+                                   "age_s": (None if self._feedback[i].get("speed_stamp") is None
+                                             else round(now - self._feedback[i]["speed_stamp"], 4))}
+                                  for i in range(2)]})
                     if out["at_end"] and endpoint_at is None:
                         endpoint_at = now
                         endpoint_due = now + 1/self.config["command_rate_hz"]

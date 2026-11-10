@@ -241,5 +241,59 @@ class RouteTests(unittest.TestCase):
         self.assertLess(max(abs(y(q) - line) for q in trace), .3)
 
 
+class StallResendAndDriveStatusTests(unittest.TestCase):
+    """Fix A: resend a stalled axis's target at standstill; log 0x9A drive status."""
+
+    def run_lower(self, *, drop_final_once=False, error_state=0, force=True):
+        from unittest.mock import patch
+        import control.motors as mm
+        from virtual_drive import config, phase
+        hw = config(max_speed_deg_s=60., segmented_motion={"enabled": True})
+        pts = [[169., 20. + .2 * k] for k in range(16)]               # lower 20 -> 23 deg
+        dropped = set()
+        def drop(axis, target):
+            # Each target within 1 deg of the end is acknowledged once but not
+            # adopted: the arm stops >1 deg short while the follower already
+            # holds the (unchanging) end target.
+            key = round(target * 100)
+            hit = drop_final_once and axis == 1 and target >= 22. and key not in dropped
+            if hit:
+                dropped.add(key)
+            return hit
+        d = VirtualDrive(model_q=pts[0], settings=hw, drop_acked=drop)
+        d.drive_error_state = error_state
+        original = mm.MotorPair._prepare_target
+        def maybe_no_force(self, i, q, **options):
+            if not force:
+                options["force_resend_axes"] = None
+            return original(self, i, q, **options)
+        with patch.object(mm.MotorPair, "_prepare_target", maybe_no_force):
+            try:
+                return d, d.run(phase(pts, times=[.02 * k for k in range(16)])), None
+            except HardwareError as exc:
+                return d, exc.details.get("motion_diagnostics"), exc.reason
+
+    def test_dropped_final_target_is_recovered_by_a_stall_resend(self):
+        d, result, reason = self.run_lower(drop_final_once=True)
+        self.assertIsNone(reason, reason)
+        self.assertEqual(result["status"], "completed")
+        self.assertTrue(d.ignored_targets)
+        self.assertGreater(result["motion_diagnostics"]["execution"]["stall_resends"][1], 0)
+        self.assertEqual(d.unsafe_directions, [])
+
+    def test_without_the_resend_the_same_drop_fails(self):
+        d, diagnostics, reason = self.run_lower(drop_final_once=True, force=False)
+        self.assertIn(reason, ("motion_goal_settle_timeout", "motion_no_progress"))
+
+    def test_drive_status_is_logged_each_cycle(self):
+        d, result, reason = self.run_lower(error_state=64)
+        self.assertIsNone(reason, reason)
+        ex = result["motion_diagnostics"]["execution"]
+        self.assertEqual(ex["drive_status1"][1]["error_flags"], ["stall"])
+        logged = [s["drive"][1]["status1"] for s in ex["follower_log"] if s["drive"][1]["status1"]]
+        self.assertTrue(logged)
+        self.assertIn("current_raw", ex["follower_log"][-1]["drive"][1])
+
+
 if __name__ == "__main__":
     unittest.main()
