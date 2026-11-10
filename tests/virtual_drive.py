@@ -42,7 +42,7 @@ class VirtualDrive:
     def __init__(self, model_q=(159., 20.), settings=None, *, ack=True,
                  immobile=False, start_friction_deg=0., query_loss=None,
                  disturbance=None, lost_targets=0, fail_write=None,
-                 breakaway_once=False):
+                 breakaway_once=False, load_model=None):
         self.pair = m.MotorPair(settings or config())
         self.now = 1000.
         self.origin = self.now
@@ -61,6 +61,10 @@ class VirtualDrive:
         self.disturbance = disturbance
         self.lost_targets = lost_targets
         self.fail_write = fail_write
+        # Non-uniform load: load_model(axis, motor_deg) -> lag (deg) the axis
+        # needs before it moves at that angle (static friction + gravity). The
+        # axis holds while |target - q| <= lag and otherwise tracks target - lag.
+        self.load_model = load_model
         self.frames = []
         self.pending_acks = []
         self.halts = []
@@ -76,6 +80,18 @@ class VirtualDrive:
     def advance(self, seconds):
         seconds = max(0., float(seconds))
         for i in range(2):
+            if self.load_model is not None and not self.immobile:
+                lag = max(0., float(self.load_model(i, self.q[i])))
+                delta = self.target[i] - self.q[i]
+                if abs(delta) <= lag + 1e-12:
+                    self.velocity[i] = 0.
+                    continue
+                goal = self.target[i] - math.copysign(lag, delta)
+                step = math.copysign(min(abs(goal - self.q[i]), self.command_speed[i] * seconds), delta)
+                self.q[i] += step
+                self.has_moved[i] |= abs(step) > 1e-9
+                self.velocity[i] = step / seconds if seconds else 0.
+                continue
             delta = self.target[i] - self.q[i]
             friction = (self.start_friction_deg[i]
                         if isinstance(self.start_friction_deg, (list, tuple))
