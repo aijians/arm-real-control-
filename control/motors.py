@@ -347,6 +347,10 @@ class MotorPair:
         # Free has its own fixed A4 speed, independent of the legacy executor cap.
         if not 0 < self.free_timed_speed <= 360:
             raise ValueError("invalid free_timed_motion.speed_deg_s")
+        self.push_upper_speed = _finite(timed.get("push_upper_speed_deg_s", self.free_timed_speed),
+                                        "free_timed_motion.push_upper_speed_deg_s")
+        if not 0 < self.push_upper_speed <= 360:
+            raise ValueError("invalid free_timed_motion.push_upper_speed_deg_s")
         self.free_timed_step = _finite(timed.get("max_step_deg", .2),
                                        "free_timed_motion.max_step_deg")
         self.free_timed_period = _finite(timed.get("period_s", .05),
@@ -1098,6 +1102,11 @@ class MotorPair:
         a, b = arm.slider_center(retained, direction), arm.slider_center(command, direction)
         return math.hypot(a[0]-b[0], a[1]-b[1]) <= .1+1e-9
 
+    def _timed_speed(self, motor, phase):
+        if phase in ("push", "push_correction") and motor["name"] == "upper":
+            return self.push_upper_speed
+        return self.free_timed_speed
+
     def _send_timed_target(self, q_rad, trace):
         """Write both absolute A4 targets, without consulting tracking feedback."""
         sent = 0
@@ -1106,12 +1115,13 @@ class MotorPair:
                 if self._halt_event.is_set():
                     raise HardwareError("motion_halted")
                 target = round(self._motor_deg(motor, math.degrees(q)) * 100)
-                speed = max(1, round(self.free_timed_speed * 100))
+                speed_deg_s = self._timed_speed(motor, trace.phase)
+                speed = max(1, round(speed_deg_s * 100))
                 wire = multi_turn_position_frame(motor["id"], target, speed)
                 event = {"motor": motor["name"], "decision_monotonic_s": time.monotonic(),
                          "command": "0xa4", "target_motor_deg": target/100,
                          "nominal_target_motor_deg": target/100,
-                         "speed_limit_deg_s": self.free_timed_speed,
+                         "speed_limit_deg_s": speed_deg_s,
                          "bias_motor_deg": 0., "tx_hex": wire.hex(" ")}
                 try:
                     port.send(wire, cancel_event=self._halt_event)
@@ -1150,7 +1160,9 @@ class MotorPair:
         sample_count = 0
         trace.execution.update(controller=controller, stage="tracking",
                                position_command="0xa4",
-                               fixed_speed_deg_s=self.free_timed_speed,
+                               default_speed_deg_s=self.free_timed_speed,
+                               fixed_axis_speed_deg_s={m["name"]: self._timed_speed(m, name)
+                                                       for m in self.motors},
                                max_step_deg=self.free_timed_step,
                                period_s=self.free_timed_period,
                                automatic_retry=False, schedule=schedule)
