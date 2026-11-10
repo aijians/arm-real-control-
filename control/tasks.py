@@ -4,7 +4,6 @@ import time
 
 from .targets import normalize_task, TargetResolver
 from .config import push_correction_settings
-from .segments import segment_settings, free_retry_phase
 
 
 class TaskError(RuntimeError):
@@ -19,7 +18,6 @@ class TaskRunner:
         self.motors, self.vision = motors, vision
         self.tolerance = float(config["verification"]["tolerance_mm"])
         self.correction_settings = push_correction_settings(config)
-        self.segments = segment_settings(config.get("hardware", {}))
         self.targets = None
         self.contact = None
         self.withdraw_extension_mm = 0.
@@ -189,7 +187,6 @@ class TaskRunner:
     def _run_leg(self, color, goal):
         record = {"color": color, "target_x_mm": goal, "attempts": [], "status": "failed"}
         limit = int(self.config["retry_limit"])
-        slow_free_retry = False
         for number in range(limit + 1):
             attempt = {"attempt": number}
             record["attempts"].append(attempt)
@@ -216,10 +213,7 @@ class TaskRunner:
                 direction = "+x" if goal > start else "-x"
                 self.tool_direction = direction
                 pre = self.planner.precontact(color, direction, state["sliders_x_mm"], state["q_rad"])
-                free = self.planner.free(state["q_rad"], pre, state["sliders_x_mm"], direction=direction)
-                if slow_free_retry:
-                    free = free_retry_phase(free, self.segments)
-                state["q_rad"] = self._move(free, attempt)
+                state["q_rad"] = self._move(self.planner.free(state["q_rad"], pre, state["sliders_x_mm"], direction=direction), attempt)
                 # The single straight push includes crossing the precontact gap.
                 # Remember its active face even when that motion fails partway.
                 self.contact = color, direction
@@ -250,22 +244,6 @@ class TaskRunner:
                 # corrections, a push stall, or a failed stopped verification.
                 if push_started:
                     return record, None
-                details = getattr(exc, "details", {})
-                diagnostic = details.get("motion_diagnostics", {})
-                execution = diagnostic.get("execution", {})
-                if (number < limit and not slow_free_retry and self.segments["enabled"]
-                        and str(exc) == "motion_goal_settle_timeout"
-                        and details.get("phase") == "free"
-                        and execution.get("stage") == "settling"
-                        and any(execution.get("endpoint_oscillating_axes", []))):
-                    slow_free_retry = True
-                    attempt["next_free_retry"] = {
-                        "reason": "endpoint_oscillation_settle_timeout",
-                        "speed_deg_s": self.segments["free_retry_speed_deg_s"],
-                        "oscillating_axes": execution["endpoint_oscillating_axes"],
-                    }
-                    print("[motion] next free retry speed: %.2f deg/s (endpoint oscillation)"
-                          % self.segments["free_retry_speed_deg_s"], flush=True)
         return record, None
 
     def run(self, task):

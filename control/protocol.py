@@ -80,23 +80,6 @@ def angle_from_reply(frame):
     return angle
 
 
-DRIVE_ERROR_FLAGS = {0: "low_voltage", 1: "high_voltage", 2: "driver_overtemperature",
-                     3: "motor_overtemperature", 4: "overcurrent", 5: "short_circuit",
-                     6: "stall", 7: "input_timeout"}
-
-
-def status1_from_reply(frame):
-    """0x9A: temperature, voltage, bus current, motor state, error bits (read-only)."""
-    if frame.command != 0x9A or len(frame.payload) != 7:
-        raise ValueError("Invalid state-1 reply")
-    p = frame.payload
-    return {"temperature_c": int.from_bytes(p[:1], "little", signed=True),
-            "voltage_v": int.from_bytes(p[1:3], "little", signed=True) / 100.0,
-            "bus_current_a": int.from_bytes(p[3:5], "little", signed=True) / 100.0,
-            "motor_state": p[5], "error_state": p[6],
-            "error_flags": [n for bit, n in DRIVE_ERROR_FLAGS.items() if p[6] & (1 << bit)]}
-
-
 def state_from_reply(frame):
     if frame.command not in (0x9C, 0xA6) or len(frame.payload) != 7:
         raise ValueError("Invalid state-2 reply")

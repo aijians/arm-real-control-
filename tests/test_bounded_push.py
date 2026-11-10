@@ -101,9 +101,7 @@ class BoundedPushTests(unittest.TestCase):
     def runner(self, outcomes, start=-10., **settings):
         config = json.loads((ROOT / "config/robot.json").read_text())
         config["verification"] = {"tolerance_mm": .5, "samples": 2, "interval_s": .001}
-        # Production robot.json omits push_correction and relies on the
-        # defaults in control.config.push_correction_settings().
-        config.setdefault("push_correction", {}).update(settings)
+        config["push_correction"].update(settings)
         vision = Vision(start)
         motors = Motors(vision, outcomes)
         planner = FakePlanner()
@@ -313,9 +311,8 @@ class CorrectionGeometryTests(unittest.TestCase):
             phase = planner.withdraw(q, "蓝", "+x", {"蓝": -21.5, "橙": 15.},
                                       from_reference=True, reference_extension_mm=2.)
         self.assertAlmostEqual(phase["reference_start_mm"][0], -20.)
-        # Right-side clearance is 10 mm; retract the 2 mm extension as well.
-        self.assertAlmostEqual(phase["reference_target_mm"][0], -32.)
-        self.assertEqual(phase["withdraw_distance_mm"], 12.)
+        self.assertAlmostEqual(phase["reference_target_mm"][0], -27.)
+        self.assertEqual(phase["withdraw_distance_mm"], 7.)
         self.assertEqual(phase["reference_contact_tolerance_mm"], 2.)
         self.assertEqual(checked.call_args.args[-1]["reference_contact_tolerance_mm"], 2.)
         with self.assertRaisesRegex(PlanError, "contact_start_position_error"):
@@ -381,7 +378,7 @@ class CorrectionGeometryTests(unittest.TestCase):
                            ("speed_mm_s", 1.1), ("min_progress_mm", 0.)):
             with self.subTest(key=key):
                 altered = copy.deepcopy(config)
-                altered.setdefault("push_correction", {})[key] = value
+                altered["push_correction"][key] = value
                 with self.assertRaises(ValueError):
                     validate_config(altered)
         self.assertEqual(push_correction_settings(config)["max_steps"], 3)

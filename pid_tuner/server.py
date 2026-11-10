@@ -11,7 +11,7 @@ import threading
 from urllib.parse import parse_qs, urlsplit
 
 from control.config import load_config
-from .service import AXIS_LABELS, Tuner, selected_motor
+from .service import Tuner
 from .exclusive import isolate_sal
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -149,42 +149,36 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='双关节PID调参台：默认演示，--real显式连接真实设备')
+    parser = argparse.ArgumentParser(description='大臂PID调参台：默认演示，--real显式连接真实设备')
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument('--real', action='store_true', help='允许通过界面连接所选关节')
+    mode.add_argument('--real', action='store_true', help='允许通过界面连接真实大臂')
     mode.add_argument('--demo', action='store_true', help='演示模式（默认，无硬件访问）')
     parser.add_argument('--host', default='127.0.0.1', help='局域网访问时使用0.0.0.0')
     parser.add_argument('--port', type=int, default=8765)
-    parser.add_argument('--axis', choices=tuple(AXIS_LABELS), default='upper',
-                        help='选择关节：upper大臂（默认），lower小臂；切换需重启工具')
-    parser.add_argument('--device', help='覆盖所选关节串口，如/dev/ttyUSB0')
-    parser.add_argument('--motor-id', type=int, help='覆盖所选关节ID，1..32')
+    parser.add_argument('--device', help='覆盖大臂串口，如/dev/ttyUSB0')
+    parser.add_argument('--motor-id', type=int, help='覆盖大臂ID，1..32')
     parser.add_argument('--pause-sal', action='store_true', help='临时暂停板端sal串口扫描，退出时自动恢复（仅实机）')
     args = parser.parse_args()
     if args.pause_sal and not args.real:
         parser.error('--pause-sal只能与--real一起使用')
     config, paths = load_config(ROOT)
-    try:
-        motor = selected_motor(config, args.axis)
-    except ValueError as exc:
-        parser.error(str(exc))
     if args.device:
-        motor['device'] = args.device
+        config['hardware']['motors'][0]['device'] = args.device
     if args.motor_id is not None:
         if not 1 <= args.motor_id <= 32:
             parser.error('--motor-id必须为1..32')
-        motor['id'] = args.motor_id
+        config['hardware']['motors'][0]['id'] = args.motor_id
     if not 0 <= args.port <= 65535:
         parser.error('--port必须为0..65535')
     token = secrets.token_urlsafe(32)
-    tuner = Tuner(config, paths, mode='real' if args.real else 'demo', axis=args.axis)
+    tuner = Tuner(config, paths, mode='real' if args.real else 'demo')
     server = None
-    isolation = isolate_sal([motor['device']]) if args.pause_sal else nullcontext()
+    isolation = isolate_sal([config['hardware']['motors'][0]['device']]) if args.pause_sal else nullcontext()
     # Bind first: a port conflict must never leave the scanner suspended.
     try:
         server = TunerServer((args.host, args.port), tuner, token)
         host = args.host if args.host not in ('0.0.0.0', '::') else '<开发板IP>'
-        print(AXIS_LABELS[args.axis]+f'PID调参台 [{args.axis}] {motor["device"]} ID{motor["id"]} / '+('真实设备模式，点击连接前不会打开串口' if args.real else '演示模式，无硬件访问'), flush=True)
+        print('大臂PID调参台 / '+('真实设备模式，点击连接前不会打开串口' if args.real else '演示模式，无硬件访问'), flush=True)
         print(f'打开完整链接：http://{host}:{server.server_port}/#token={token}', flush=True)
         print('停止服务：Ctrl+C。实机模式请先退出主控制程序，串口不能共享。', flush=True)
         def stop(signum, frame):

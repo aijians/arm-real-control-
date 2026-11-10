@@ -16,7 +16,6 @@ import time
 from .config import resolve, push_correction_settings
 from .kinematics import PlanarArm
 from .scene import SimpleScene
-from .segments import segment_settings, phase_profile, resample_route
 
 
 class PlanError(RuntimeError):
@@ -29,7 +28,6 @@ class Planner:
         self.config = (json.loads((self.root / "config/robot.json").read_text())
                        if config is None else config)
         self.settings = self.config["planning"]
-        self.segments = segment_settings(self.config.get("hardware", {}))
         self.correction_settings = push_correction_settings(self.config)
         for key in ("free_speed_deg_s", "free_speed_mm_s", "push_speed_mm_s",
                     "contact_speed_mm_s", "linear_step_mm",
@@ -212,28 +210,9 @@ class Planner:
         return [points[index] for index in selected], selected
 
     def _phase(self, name, path, distances, speed, *, _collision_context=None, **metadata):
-        segment_control = None
-        original_dense_count = len(path)
-        source_positions, step_caps = None, []
-        joint_rate = self.joint_rate
-        if self.segments["enabled"]:
-            segment_control = phase_profile(self.segments, name)
-            direction = metadata.get("direction", "+x")
-            try:
-                path, distances, source_positions, step_caps = resample_route(
-                    path, distances, [self.arm.slider_center(q, direction) for q in path],
-                    self.segments, name, self.config["hardware"]["motors"],
-                    lambda a, b: self._command_chord_clear(name, a, b, direction, _collision_context),
-                    gap_mm=metadata.get("start_gap_mm", 0.0))
-            except ValueError as exc:
-                raise PlanError(str(exc)) from exc
-            ratios = [m["ratio"] for m in self.config["hardware"]["motors"]]
-            joint_rate = math.radians(segment_control["speed_deg_s"]/max(ratios))
-            # Legacy metadata cannot enable an implicit Cartesian bias.
-            metadata.pop("cartesian_compensation", None)
         retained, costs = [list(path[0])], [0.]
         for i, q in enumerate(path[1:]):
-            joint_time = max(abs(b-a) for a, b in zip(path[i], q)) / joint_rate
+            joint_time = max(abs(b-a) for a, b in zip(path[i], q)) / self.joint_rate
             cost = max(joint_time, float(distances[i]) / speed)
             if cost > 1e-12:
                 retained.append(list(q))
@@ -245,11 +224,8 @@ class Planner:
             points = [{"q_rad": q, "time_s": duration * self._inverse_smoothstep(c / costs[-1])}
                       for q, c in zip(retained, costs)]
         dense_count = len(points)
-        if segment_control is None:
-            points, source_indices = self._command_points(
-                name, points, metadata.get("direction", "+x"), _collision_context)
-        else:
-            source_indices = list(range(len(points)))
+        points, source_indices = self._command_points(
+            name, points, metadata.get("direction", "+x"), _collision_context)
         recovery_geometry = None
         policy_enabled = self.config.get("hardware",{}).get("motion_recovery",{}).get("enabled",False)
         if policy_enabled and _collision_context is not None:
@@ -264,17 +240,13 @@ class Planner:
             for i,(a,b) in enumerate(zip(points,points[1:]),1) for axis in range(2)
             if 1e-7 < abs(math.degrees(b["q_rad"][axis]-a["q_rad"][axis])) < self.waypoint_min_axis_step_deg-1e-9]
         return {"phase": name, "points": points,
-                "segment_control": segment_control,
-                "segment_step_caps_deg": step_caps,
-                "dense_route_point_count": original_dense_count,
-                "source_route_positions": source_positions,
                 "motion_recovery_geometry": recovery_geometry,
-                "waypoint_min_axis_step_deg": (0.0 if segment_control is not None else self.waypoint_min_axis_step_deg),
+                "waypoint_min_axis_step_deg": self.waypoint_min_axis_step_deg,
                 "protected_micro_steps": protected_micro_steps, "angle_convention": "model_q1_world_bearing_q2_BAC",
                 "time_parameterization": "quintic_progress_on_joint_polyline",
                 "dense_point_count": dense_count, "source_point_indices": source_indices,
                 "command_point_count": len(points),
-                "waypoint_min_step_deg": (0.0 if segment_control is not None else self.waypoint_min_step_deg),
+                "waypoint_min_step_deg": self.waypoint_min_step_deg,
                 "command_chord_cartesian_error_limit_mm": .1, **metadata}
 
     def _clear(self, q, sliders, contact=None):

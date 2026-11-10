@@ -50,24 +50,13 @@ def number(value, name):
     return float(value)
 
 
-AXIS_LABELS = {'upper': '大臂', 'lower': '小臂'}
-
-
-def selected_motor(config, axis):
-    if axis not in AXIS_LABELS:
-        raise ValueError('关节必须为upper或lower')
-    motors = [motor for motor in config['hardware']['motors'] if motor['name'] == axis]
-    if len(motors) != 1:
-        raise ValueError('配置中必须有且仅有一个'+axis+'关节')
-    return motors[0]
-
-
 class Tuner:
-    def __init__(self, config, paths, mode='demo', device_factory=None, start_worker=True, axis='upper'):
-        motor = selected_motor(config, axis)
-        self.axis, self.axis_label = axis, AXIS_LABELS[axis]
+    def __init__(self, config, paths, mode='demo', device_factory=None, start_worker=True):
+        motor = config['hardware']['motors'][0]
+        if motor['name'] != 'upper':
+            raise ValueError('第一轴必须配置为upper大臂')
         self.mode = mode
-        self.connection = {'axis': axis, 'axis_label': self.axis_label, 'device': motor['device'], 'motor_id': motor['id'],
+        self.connection = {'device': motor['device'], 'motor_id': motor['id'],
                            'baudrate': int(config['hardware']['baudrate']),
                            **{k: motor[k] for k in ('sign', 'ratio', 'offset_deg')}}
         self.connection['parameter_protocol'] = config['hardware'].get('pid_parameter_protocol', 'vendor_v235')
@@ -123,7 +112,7 @@ class Tuner:
 
     def _require(self):
         if not self.connected or self._device is None:
-            raise ValueError(f'请先连接{self.axis_label}')
+            raise ValueError('请先连接大臂')
 
     def _idle(self):
         self._require()
@@ -228,7 +217,7 @@ class Tuner:
         with self._ops:
             self._check_cancel(generation)
             if self.motion['active'] or self.motion.get('stop_required'):
-                raise ValueError(f'请先确认{self.axis_label}停止，再运行只读诊断')
+                raise ValueError('请先确认大臂停止，再运行只读诊断')
             temporary = not self.connected
             if not self.session_id:
                 self.session_id = uuid.uuid4().hex
@@ -275,7 +264,7 @@ class Tuner:
                 if self.motion.get('trial_outcome') == 'pending':
                     self.motion['trial_outcome'] = 'cancelled'
             self._stop_and_confirm()
-            self._event(f'已停止并断开{self.axis_label}')
+            self._event('已停止并断开大臂')
             self.connected = False
             self._release()
             self._persist()
@@ -356,7 +345,7 @@ class Tuner:
                     if self.motion.get('trial_outcome') == 'pending':
                         self.motion['trial_outcome'] = 'cancelled'
                 self._stop_and_confirm()
-                self._event(f'停止{self.axis_label}：反馈已确认停稳')
+                self._event('停止大臂：反馈已确认停稳')
                 self._persist()
             finally:
                 self._stop_requested.clear()
@@ -506,7 +495,7 @@ class Tuner:
     def enable(self, confirm):
         generation = self._stop_generation
         if confirm != 'ENABLE_MOTOR':
-            raise ValueError(f'需要明确确认使能{self.axis_label}')
+            raise ValueError('需要明确确认使能大臂')
         with self._ops:
             self._idle()
             self._require_verified_parameters()
@@ -517,7 +506,7 @@ class Tuner:
             self._check_cancel(generation)
             self._device.enable()
             self.sample()
-            self._event(f'已显式发送{self.axis_label}使能命令0x88')
+            self._event('已显式发送大臂使能命令0x88')
             self._persist()
 
     def move(self, target_deg, speed_deg_s):
@@ -525,7 +514,7 @@ class Tuner:
         target = number(target_deg, '目标角度')
         speed = number(speed_deg_s, '试转速度')
         if not self.limits['min_deg'] <= target <= self.limits['max_deg']:
-            raise ValueError(f'目标角度超出{self.axis_label}配置限位')
+            raise ValueError('目标角度超出大臂配置限位')
         if not 0 < speed <= self.limits['max_test_speed_deg_s']:
             raise ValueError('试转速度必须大于0且不超过60°/s')
         with self._ops:
@@ -548,11 +537,11 @@ class Tuner:
             if row['error_state']:
                 feedback_reason = '驱动器存在故障，不能试转：'+','.join(row['error_flags'])
             elif row['motor_state'] != 0:
-                feedback_reason = f'{self.axis_label}处于关闭状态，请先显式使能'
+                feedback_reason = '大臂处于关闭状态，请先显式使能'
             elif not self.limits['min_deg'] <= row['angle_deg'] <= self.limits['max_deg']:
                 feedback_reason = '实测角度超出配置限位，请先停止检查'
             elif not retarget and abs(row['speed_deg_s']) > 1:
-                feedback_reason = f'当前{self.axis_label}尚未停稳'
+                feedback_reason = '当前大臂尚未停稳'
             elif retarget and time.monotonic()-self._last_client > 3:
                 feedback_reason = '浏览器心跳中断超过3秒'
             if feedback_reason:
@@ -796,13 +785,13 @@ class Tuner:
 
     def csv(self):
         stream = io.StringIO()
-        fields = ['axis', 'motor_id', 'seq', 't', 'target_deg', 'angle_deg', 'motor_angle_deg', 'speed_deg_s',
+        fields = ['seq', 't', 'target_deg', 'angle_deg', 'motor_angle_deg', 'speed_deg_s',
                   'motion_phase', 'trial_outcome', 'trial_id', 'target_error_deg',
                   'bus_current_a', 'iq_or_power_raw', 'voltage_v', 'temperature_c', 'error_state']
         writer = csv.DictWriter(stream, fieldnames=fields, extrasaction='ignore')
         writer.writeheader()
         for row in self.export()['readings']:
-            writer.writerow({**row, 'axis': self.axis, 'motor_id': self.connection['motor_id']})
+            writer.writerow(row)
         return '\ufeff'+stream.getvalue()
 
     def close(self):

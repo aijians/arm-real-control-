@@ -244,8 +244,7 @@ class DemoDevice:
         self.params = {0x96: encode_pid(50, 0, 0), 0x97: encode_pid(100, 30, 0),
                        0x98: encode_pid(40, 20, 0), 0x99: (850).to_bytes(2, 'little', signed=True)+bytes(4)}
         self.rom = dict(self.params)
-        initial = 45. if connection.get('axis') == 'lower' else 169.11
-        self.angle, self.target, self.speed = initial, initial, 0.
+        self.angle, self.target, self.speed = 169.11, 169.11, 0.
         self.enabled = True
         self.last = time.monotonic()
 
