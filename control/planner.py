@@ -427,6 +427,50 @@ class Planner:
             reference_contact_tolerance_mm=reference_extension_mm,
             start_tangential_error_mm=y_error, offset_axis="world_x")
 
+    def retry_contact(self, phase, q_start, sliders):
+        """Resume a correction/withdrawal to its original, fixed endpoint."""
+        name, direction = phase["phase"], phase["direction"]
+        if name not in ("push_correction", "withdraw"):
+            raise PlanError("unsupported_contact_retry")
+        q, positions = self._q(q_start), self._positions(sliders)
+        end_q = list(phase["points"][-1]["q_rad"])
+        start = list(self.arm.slider_center(q, direction))
+        end = list(self.arm.slider_center(end_q, direction))
+        tolerance = self.settings["contact_position_tolerance_mm"]
+        sign = 1 if direction == "+x" else -1
+        if abs(start[1] - end[1]) > tolerance:
+            raise PlanError("contact_retry_y_error_exceeds_tolerance")
+        if self.arm.world_normal(q, direction)[0] * sign <= 0:
+            raise PlanError("contact_face_points_away_from_slider")
+        if name == "push_correction":
+            remaining = sign * (end[0] - start[0])
+            if remaining < -1e-9 or remaining > self.correction_settings["step_mm"] + 1e-9:
+                raise PlanError("contact_retry_outside_correction_budget")
+            speed = self.correction_settings["speed_mm_s"]
+            contact = None
+        else:
+            if sign * (end[0] - start[0]) > tolerance:
+                raise PlanError("contact_retry_would_push_forward")
+            speed = self.settings["contact_speed_mm_s"]
+            contact = {"color": phase["color"], "direction": direction,
+                "tolerance_mm": self.offsets[direction] + tolerance}
+            if phase.get("from_reference"):
+                contact = {"color": phase["color"], "direction": direction,
+                    "reference_contact_tolerance_mm": phase["reference_extension_mm"]}
+        path, distances = self._line(q, end, direction, q_goal=end_q)
+        if name == "withdraw":
+            self._checked_edges(path, positions, contact)
+            self._clear(path[-1], positions)
+        metadata = {key: phase[key] for key in (
+            "color", "direction", "task_target_x_mm", "feasible_x_limits_mm",
+            "extension_mm", "from_reference", "reference_extension_mm",
+            "reference_contact_tolerance_mm") if key in phase}
+        return self._phase(name, path, distances, speed,
+            _collision_context=(positions, contact), **metadata,
+            reference_start_mm=start, reference_target_mm=end,
+            retry_fixed_endpoint=True, collision_checked=name == "withdraw",
+            cartesian_compensation=self._cartesian_compensation(start, end, direction))
+
     @staticmethod
     def _push_target(target_x_mm, limits_x_mm):
         try:

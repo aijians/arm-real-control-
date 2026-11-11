@@ -96,12 +96,15 @@ class FakePlanner:
         self.corrections.append(phase)
         return phase
 
+    def retry_contact(self, phase, q, sliders):
+        return copy.deepcopy(phase)
+
 
 class BoundedPushTests(unittest.TestCase):
     def runner(self, outcomes, start=-10., **settings):
         config = json.loads((ROOT / "config/robot.json").read_text())
         config["verification"] = {"tolerance_mm": .5, "samples": 2, "interval_s": .001}
-        config["push_correction"].update(settings)
+        config.setdefault("push_correction", {}).update(settings)
         vision = Vision(start)
         motors = Motors(vision, outcomes)
         planner = FakePlanner()
@@ -164,29 +167,29 @@ class BoundedPushTests(unittest.TestCase):
         self.assertTrue(all(p["extension_mm"] <= .6 for p in runner.planner.corrections))
 
     def test_no_visual_progress_stops_after_first_ineffective_correction(self):
-        runner = self.runner([-2., -1.95])
+        runner = self.runner([-2., -1.95, -1.95, -1.95, -1.95])
         record, _ = self.run_leg(runner)
         self.assertEqual(record["reason"], "push_no_progress")
         self.assertEqual(len(record["attempts"]), 1)
         self.assertEqual(len(runner.planner.corrections), 1)
 
     def test_no_progress_in_main_push_never_starts_correction(self):
-        runner = self.runner([-9.95])
+        runner = self.runner([-9.95] * 4)
         record, _ = self.run_leg(runner)
         self.assertEqual(record["reason"], "push_no_progress")
         self.assertEqual(len(record["attempts"]), 1)
         self.assertEqual(runner.planner.corrections, [])
 
-    def test_main_motor_stall_does_not_replay_or_start_correction(self):
-        runner = self.runner([(-2., "motion_no_progress")])
+    def test_main_motor_stall_has_three_retries_without_correction(self):
+        runner = self.runner([(-2., "motion_no_progress")] * 4)
         record, _ = self.run_leg(runner)
         self.assertEqual(record["reason"], "motion_no_progress")
         self.assertEqual(len(record["attempts"]), 1)
         self.assertEqual(runner.planner.corrections, [])
-        self.assertEqual(sum(p["phase"] == "push" for p in runner.motors.moves), 1)
+        self.assertEqual(sum(p["phase"] == "push" for p in runner.motors.moves), 4)
 
-    def test_correction_motor_stall_stops_without_using_remaining_budget(self):
-        runner = self.runner([-2., (-1.5, "motion_no_progress")])
+    def test_correction_motor_stall_retries_same_step_without_using_remaining_budget(self):
+        runner = self.runner([-2.] + [(-1.5, "motion_no_progress")] * 4)
         record, _ = self.run_leg(runner)
         self.assertEqual(record["reason"], "motion_no_progress")
         self.assertEqual(len(record["attempts"]), 1)
@@ -244,7 +247,7 @@ class BoundedPushTests(unittest.TestCase):
         runner = self.runner([0.])
         runner.planner.free = Mock(side_effect=RuntimeError("free_path_not_found"))
         record, _ = self.run_leg(runner)
-        self.assertEqual(len(record["attempts"]), 4)
+        self.assertEqual(len(record["attempts"][0]["stage_attempts"]["free"]), 4)
         self.assertEqual(record["reason"], "free_path_not_found")
         self.assertEqual(runner.motors.moves, [])
 
@@ -272,7 +275,8 @@ class CorrectionGeometryTests(unittest.TestCase):
         self.assertAlmostEqual(phase["reference_start_mm"][0], -20.)
         self.assertAlmostEqual(phase["reference_target_mm"][0], -19.)
         self.assertAlmostEqual(planner.arm.slider_center(phase["points"][-1]["q_rad"], "+x")[0], -19.)
-        self.assertGreaterEqual(phase["points"][-1]["time_s"], 1.)
+        self.assertAlmostEqual(phase["points"][-1]["time_s"],
+                               .05 * (len(phase["points"]) - 1))
         for point in phase["points"]:
             self.assertTrue(planner.arm.within_limits(point["q_rad"]))
             self.assertGreater(planner.arm.world_normal(point["q_rad"], "+x")[0], 0.)
@@ -311,8 +315,8 @@ class CorrectionGeometryTests(unittest.TestCase):
             phase = planner.withdraw(q, "蓝", "+x", {"蓝": -21.5, "橙": 15.},
                                       from_reference=True, reference_extension_mm=2.)
         self.assertAlmostEqual(phase["reference_start_mm"][0], -20.)
-        self.assertAlmostEqual(phase["reference_target_mm"][0], -27.)
-        self.assertEqual(phase["withdraw_distance_mm"], 7.)
+        self.assertAlmostEqual(phase["reference_target_mm"][0], -20. - planner.offsets["+x"] - 2.)
+        self.assertEqual(phase["withdraw_distance_mm"], planner.offsets["+x"] + 2.)
         self.assertEqual(phase["reference_contact_tolerance_mm"], 2.)
         self.assertEqual(checked.call_args.args[-1]["reference_contact_tolerance_mm"], 2.)
         with self.assertRaisesRegex(PlanError, "contact_start_position_error"):
@@ -378,7 +382,7 @@ class CorrectionGeometryTests(unittest.TestCase):
                            ("speed_mm_s", 1.1), ("min_progress_mm", 0.)):
             with self.subTest(key=key):
                 altered = copy.deepcopy(config)
-                altered["push_correction"][key] = value
+                altered.setdefault("push_correction", {})[key] = value
                 with self.assertRaises(ValueError):
                     validate_config(altered)
         self.assertEqual(push_correction_settings(config)["max_steps"], 3)

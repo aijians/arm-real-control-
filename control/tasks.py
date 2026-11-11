@@ -13,6 +13,9 @@ class TaskError(RuntimeError):
 
 
 class TaskRunner:
+    _NO_RETRY = {"motion_halted", "stop_not_confirmed", "joint_feedback_out_of_limits",
+                 "motion_goal_hold_hard_limit", "slider_overshot_target", "motion_already_running"}
+
     def __init__(self, planner, config, motors=None, vision=None):
         self.planner, self.config = planner, config
         self.motors, self.vision = motors, vision
@@ -98,18 +101,56 @@ class TaskRunner:
         return {"passed": bool(samples) and all(abs(s["error_mm"]) <= self.tolerance for s in samples),
                 "samples": samples, "last_observation": state}
 
+    def _stage(self, name, state, record, action):
+        """Each stage owns its initial attempt plus retry_limit retries."""
+        attempts = record.setdefault("stage_attempts", {}).setdefault(name, [])
+        limit = int(self.config["retry_limit"])
+        for number in range(limit + 1):
+            attempt = {"attempt": number}
+            attempts.append(attempt)
+            try:
+                if number:
+                    stop = self.motors.halt()
+                    attempt["stop_before_retry"] = stop
+                    if not stop.get("stopped_confirmed"):
+                        raise TaskError("stop_not_confirmed")
+                    state.update(self._snapshot())
+                attempt["start_state"] = dict(state)
+                result = action(attempt)
+                attempt["status"] = "completed"
+                return result
+            except Exception as exc:
+                stop = self.motors.halt()
+                attempt.update(status="failed", reason=str(exc),
+                               error_type=type(exc).__name__,
+                               details=getattr(exc, "details", {}), stop=stop)
+                # A requested halt, hard limit or unconfirmed stop must never
+                # be cleared by the next call to MotorPair.move.
+                if (number == limit or not stop.get("stopped_confirmed")
+                        or str(exc) in self._NO_RETRY):
+                    raise
+                print("[motion] retry %s %d/%d: %s" %
+                      (name, number + 1, limit, exc), flush=True)
+
     def _withdraw(self, state, record):
         if self.contact is not None:
             c, d = self.contact
             options = ({"from_reference": True, "reference_extension_mm": self.withdraw_extension_mm}
                        if self.withdraw_extension_mm else {})
-            phase = self.planner.withdraw(state["q_rad"], c, d, state["sliders_x_mm"], **options)
-            state["q_rad"] = self._move(phase, record)
+            phase = None
+            def withdraw(attempt):
+                nonlocal phase
+                if phase is None:
+                    phase = self.planner.withdraw(state["q_rad"], c, d, state["sliders_x_mm"], **options)
+                else:
+                    phase = self.planner.retry_contact(phase, state["q_rad"], state["sliders_x_mm"])
+                state["q_rad"] = self._move(phase, attempt)
+                # A withdrawal can disturb a slider. Include its fresh image
+                # in this stage, so observation failures use the same budget.
+                state.update(self.vision.read(after_monotonic_s=time.monotonic()))
+            self._stage("withdraw", state, record, withdraw)
             self.contact = None
             self.withdraw_extension_mm = 0.
-            # Withdrawal can also disturb a slider; use a new image before the
-            # next free-space route rather than its pre-withdrawal positions.
-            state.update(self.vision.read(after_monotonic_s=time.monotonic()))
 
     def _stopped_verification(self, color, goal, record):
         stop = self.motors.halt()
@@ -127,18 +168,55 @@ class TaskRunner:
         try:
             self._move(phase, record)
         except Exception as exc:
-            error = str(exc)
-            record["push_motor_error"] = error
+            error = exc
+            record["push_motor_error"] = str(error)
+            if str(error) in self._NO_RETRY:
+                raise
         # Even a normally completed trajectory must be explicitly stopped
         # before obtaining the images used for task acceptance.
         return self._stopped_verification(color, goal, record), error
 
+    def _push_stage(self, name, factory, color, goal, direction, state, record):
+        def push(attempt):
+            sign = 1 if direction == "+x" else -1
+            # A previous failed move may already have reached the slider goal.
+            if attempt["attempt"]:
+                verification = self._stopped_verification(color, goal, attempt)
+                state.update(verification["last_observation"])
+                if verification["passed"]:
+                    return verification, None
+                if sign * (goal - state["sliders_x_mm"][color]) < -self.tolerance:
+                    raise TaskError("slider_overshot_target")
+                if sign * (goal - state["sliders_x_mm"][color]) <= self.tolerance:
+                    raise TaskError("slider_not_stably_at_target")
+            before = state["sliders_x_mm"][color]
+            verification, error = self._stopped_push(factory(), color, goal, attempt)
+            state.update(verification["last_observation"])
+            if error is not None and str(error) in self._NO_RETRY:
+                raise error
+            if error is not None and not verification["passed"]:
+                raise error
+            if not verification["passed"]:
+                actual = state["sliders_x_mm"][color]
+                if sign * (goal - actual) < -self.tolerance:
+                    raise TaskError("slider_overshot_target")
+                if sign * (actual - before) < self.correction_settings["min_progress_mm"]:
+                    raise TaskError("push_no_progress")
+            return verification, None
+        result = self._stage(name, state, record, push)
+        # Keep the established stopped-verification fields for result readers.
+        last = record["stage_attempts"][name][-1]
+        for key in ("stop", "verification", "verification_after_monotonic_s", "push_motor_error"):
+            if key in last:
+                record[key] = last[key]
+        return result
+
     def _push_with_corrections(self, color, goal, direction, state, record):
         sign = 1 if direction == "+x" else -1
         before = float(state["sliders_x_mm"][color])
-        phase = self.planner.push(state["q_rad"], color, goal,
-                                  state["sliders_x_mm"], self.targets.bounds(color))
-        verification, error = self._stopped_push(phase, color, goal, record)
+        verification, error = self._push_stage("push", lambda: self.planner.push(
+            state["q_rad"], color, goal, state["sliders_x_mm"], self.targets.bounds(color)),
+            color, goal, direction, state, record)
         corrections = record["corrections"] = []
         used = 0.
         settings = self.correction_settings
@@ -152,7 +230,7 @@ class TaskRunner:
                 self.withdraw_extension_mm = used
                 return state
             if error is not None:
-                raise TaskError(error)
+                raise error
             remaining = sign * (goal - actual)
             if remaining <= 0:
                 raise TaskError("slider_overshot_target")
@@ -170,82 +248,69 @@ class TaskRunner:
             # previous phase or the visually observed slider's X coordinate.
             state["q_rad"] = self.motors.read_state()["q_rad"]
             distance = min(settings["step_mm"], settings["max_distance_mm"] - used, remaining)
-            phase = self.planner.correction(state["q_rad"], color, goal, direction,
-                state["sliders_x_mm"], self.targets.bounds(color), distance)
             used += distance
             correction = {"step": len(corrections) + 1, "extension_mm": distance,
                           "cumulative_extension_mm": used, "task_target_x_mm": goal,
-                          "reference_start_mm": phase["reference_start_mm"],
-                          "reference_target_mm": phase["reference_target_mm"],
                           "before_x_mm": actual}
             corrections.append(correction)
             before = actual
-            verification, error = self._stopped_push(phase, color, goal, correction)
+            phase = None
+            def correction_phase():
+                nonlocal phase
+                if phase is None:
+                    phase = self.planner.correction(state["q_rad"], color, goal, direction,
+                        state["sliders_x_mm"], self.targets.bounds(color), distance)
+                    correction.update(reference_start_mm=phase["reference_start_mm"],
+                                      reference_target_mm=phase["reference_target_mm"])
+                else:
+                    phase = self.planner.retry_contact(phase, state["q_rad"], state["sliders_x_mm"])
+                return phase
+            verification, error = self._push_stage("push_correction", correction_phase,
+                color, goal, direction, state, correction)
             correction["after_x_mm"] = float(verification["last_observation"]["sliders_x_mm"][color])
             correction["progress_mm"] = sign * (correction["after_x_mm"] - before)
 
     def _run_leg(self, color, goal):
         record = {"color": color, "target_x_mm": goal, "attempts": [], "status": "failed"}
-        limit = int(self.config["retry_limit"])
-        for number in range(limit + 1):
-            attempt = {"attempt": number}
-            record["attempts"].append(attempt)
-            push_started = False
-            try:
-                if number:
-                    stop = self.motors.halt()
-                    attempt["stop_before_retry"] = stop
-                    if not stop.get("stopped_confirmed"):
-                        raise TaskError("stop_not_confirmed")
-                state = self._snapshot()
-                attempt["start_state"] = state
-                self._withdraw(state, attempt)
-                start = state["sliders_x_mm"][color]
-                if abs(goal - start) <= self.tolerance:
+        attempt = {"attempt": 0}
+        record["attempts"].append(attempt)
+        state = {}
+        try:
+            def observe(_):
+                state.update(self._snapshot())
+            self._stage("observe", state, attempt, observe)
+            attempt["start_state"] = dict(state)
+            self._withdraw(state, attempt)
+            start = state["sliders_x_mm"][color]
+            if abs(goal - start) <= self.tolerance:
+                def verify(_):
                     verification = self._stopped_verification(color, goal, attempt)
                     if not verification["passed"]:
                         raise TaskError("slider_not_at_target")
                     state.update(verification["last_observation"])
-                    attempt.update(status="completed", no_motion=True)
-                    record["status"] = "completed"
-                    record.pop("reason", None)
-                    return record, state
+                self._stage("verification", state, attempt, verify)
+                attempt["no_motion"] = True
+            else:
                 direction = "+x" if goal > start else "-x"
                 self.tool_direction = direction
-                pre = self.planner.precontact(color, direction, state["sliders_x_mm"], state["q_rad"])
-                state["q_rad"] = self._move(self.planner.free(state["q_rad"], pre, state["sliders_x_mm"], direction=direction), attempt)
-                # The single straight push includes crossing the precontact gap.
-                # Remember its active face even when that motion fails partway.
+                def free(stage_attempt):
+                    pre = self.planner.precontact(color, direction, state["sliders_x_mm"], state["q_rad"])
+                    state["q_rad"] = self._move(self.planner.free(state["q_rad"], pre,
+                        state["sliders_x_mm"], direction=direction), stage_attempt)
+                self._stage("free", state, attempt, free)
                 self.contact = color, direction
                 self.withdraw_extension_mm = 0.
-                push_started = True
                 state = self._push_with_corrections(color, goal, direction, state, attempt)
                 self._withdraw(state, attempt)
-                attempt["status"] = "completed"
-                record["status"] = "completed"
-                record.pop("reason", None)
-                return record, state
-            except KeyboardInterrupt:
-                attempt.update(status="interrupted", stop=self.motors.halt())
-                record["reason"] = "task_interrupted"
-                return record, None
-            except Exception as exc:
-                attempt.update(status="failed", reason=str(exc),
-                               error_type=type(exc).__name__,
-                               details=getattr(exc, "details", {}), stop=self.motors.halt())
-                record["reason"] = str(exc)
-                if getattr(exc, "details", {}).get("controller") == "free_timed":
-                    return record, None
-                # The current move already used its finite speed-recovery
-                # budget. Replaying a whole leg must not restart that budget.
-                if (getattr(exc, "details", {}).get("recovery_exhausted")
-                        or getattr(exc, "details", {}).get("speed_recovery_attempted")):
-                    return record, None
-                # Retrying free entry can recover a stale observation or a
-                # blocked entry. Never replay a complete push after the bounded
-                # corrections, a push stall, or a failed stopped verification.
-                if push_started:
-                    return record, None
+            attempt["status"] = record["status"] = "completed"
+            return record, state
+        except KeyboardInterrupt:
+            attempt.update(status="interrupted", stop=self.motors.halt())
+            record["reason"] = "task_interrupted"
+        except Exception as exc:
+            attempt.update(status="failed", reason=str(exc), error_type=type(exc).__name__,
+                           details=getattr(exc, "details", {}), stop=self.motors.halt())
+            record["reason"] = str(exc)
         return record, None
 
     def run(self, task):
@@ -285,7 +350,10 @@ class TaskRunner:
             result["return_motion"] = {"target_q_deg": list(self.return_q_deg)}
             return_q_rad = [math.radians(value) for value in self.return_q_deg]
             print("[motion] return target: upper=%.2f deg, lower=%.2f deg" % tuple(self.return_q_deg), flush=True)
-            self._move(self.planner.free(state["q_rad"], return_q_rad, state["sliders_x_mm"], direction=self.tool_direction), result["return_motion"])
+            def return_home(attempt):
+                state["q_rad"] = self._move(self.planner.free(state["q_rad"], return_q_rad,
+                    state["sliders_x_mm"], direction=self.tool_direction), attempt)
+            self._stage("return", state, result["return_motion"], return_home)
             result["status"] = "completed"
         except KeyboardInterrupt:
             result.update(reason="task_interrupted", stop=self.motors.halt())

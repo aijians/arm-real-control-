@@ -217,7 +217,7 @@ class TimedFreeTests(unittest.TestCase):
                 with self.subTest(key=key, value=value), self.assertRaises(ValueError):
                     m.MotorPair(cfg)
 
-    def test_task_does_not_retry_free_baseline_failure(self):
+    def test_task_retries_free_baseline_failure_three_times(self):
         runner = TaskRunner.__new__(TaskRunner)
         runner.config = {"retry_limit": 3}
         runner.tolerance = .5
@@ -231,7 +231,8 @@ class TimedFreeTests(unittest.TestCase):
         record, state = runner._run_leg("蓝", 10)
         self.assertIsNone(state)
         self.assertEqual(len(record["attempts"]), 1)
-        self.assertEqual(runner._move.call_count, 1)
+        self.assertEqual(runner._move.call_count, 4)
+        self.assertEqual(len(record["attempts"][0]["stage_attempts"]["free"]), 4)
 
 
 class MultiTurnProtocolTests(unittest.TestCase):
