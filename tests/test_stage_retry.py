@@ -33,7 +33,49 @@ class StageRetryTests(unittest.TestCase):
         self.assertEqual([a["attempt"] for a in stages["free"]], [0, 1, 2, 3])
         self.assertEqual([a["attempt"] for a in stages["push"]], [0, 1, 2, 3])
         self.assertEqual(stages["free"][3]["start_state"]["q_rad"], [-7., 0.])
-        self.assertEqual(len(free_calls), 4)
+        self.assertEqual(len(free_calls), 7)
+
+    def test_push_retry_reobserves_and_runs_free_before_push(self):
+        runner = self.runner([(-2., "motion_goal_settle_timeout"), 0.])
+        precontact = runner.planner.precontact = Mock(return_value=[-10., 0.])
+        observations = runner._snapshot = Mock(wraps=runner._snapshot)
+        original = runner.motors.move
+        sequence = []
+        def move(phase, **kwargs):
+            sequence.append(phase["phase"])
+            if phase["phase"] == "push" and sequence.count("push") == 2:
+                # Reproduce the reported contact guard: retry is only valid
+                # after a new Free, rather than a repeated direct push.
+                self.assertEqual(sequence[-2], "free")
+                self.assertGreaterEqual(len(runner.vision.reads), 3)
+            return original(phase, **kwargs)
+        runner.motors.move = move
+        with patch("control.tasks.time.sleep"):
+            record, _ = runner._run_leg("蓝", 0.)
+        self.assertEqual(record["status"], "completed")
+        self.assertEqual(sequence, ["free", "push", "free", "push"])
+        self.assertEqual(observations.call_count, 2)
+        self.assertEqual(precontact.call_args_list[1].args[2]["蓝"], -2.)
+        self.assertEqual(precontact.call_args_list[1].args[3], [0., 0.])
+        retry = record["attempts"][0]["stage_attempts"]["push"][1]
+        self.assertEqual(retry["reentry_free"]["motions"][0]["phase"], "free")
+
+    def test_failed_reentry_consumes_push_retry_and_never_pushes_from_bad_pose(self):
+        runner = self.runner([(-2., "motion_goal_settle_timeout"), 0.])
+        original = runner.motors.move
+        sequence = []
+        def move(phase, **kwargs):
+            sequence.append(phase["phase"])
+            if sequence == ["free", "push", "free"]:
+                raise HardwareError("motion_goal_settle_timeout")
+            return original(phase, **kwargs)
+        runner.motors.move = move
+        with patch("control.tasks.time.sleep"):
+            record, _ = runner._run_leg("蓝", 0.)
+        self.assertEqual(record["status"], "completed")
+        self.assertEqual(sequence, ["free", "push", "free", "free", "push"])
+        retries = record["attempts"][0]["stage_attempts"]["push"]
+        self.assertEqual([a["status"] for a in retries], ["failed", "failed", "completed"])
 
     def test_free_exhaustion_never_starts_push(self):
         runner = self.runner([])
@@ -123,7 +165,8 @@ class StageRetryTests(unittest.TestCase):
             before = checked.call_count
             phase = planner.retry_contact(phase, planner.arm.inverse([-25., 155.], "+x"), sliders)
             self.assertEqual(phase["points"][-1]["q_rad"], endpoint)
-            self.assertAlmostEqual(phase["reference_target_mm"][0], -32.)
+            self.assertAlmostEqual(phase["reference_target_mm"][0],
+                                   -20. - planner.offsets["+x"] - 2.)
             self.assertGreater(checked.call_count, before)
 
 

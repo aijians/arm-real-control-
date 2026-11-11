@@ -189,6 +189,13 @@ class TaskRunner:
                     raise TaskError("slider_overshot_target")
                 if sign * (goal - state["sliders_x_mm"][color]) <= self.tolerance:
                     raise TaskError("slider_not_stably_at_target")
+                if name == "push":
+                    # A failed push can stop away from the contact line.
+                    # Use the new image and measured pose to approach again;
+                    # never plan a direct push from that released pose.
+                    state["q_rad"] = self.motors.read_state()["q_rad"]
+                    entry = attempt["reentry_free"] = {"start_state": dict(state)}
+                    self._free_entry(color, direction, state, entry)
             before = state["sliders_x_mm"][color]
             verification, error = self._stopped_push(factory(), color, goal, attempt)
             state.update(verification["last_observation"])
@@ -210,6 +217,11 @@ class TaskRunner:
             if key in last:
                 record[key] = last[key]
         return result
+
+    def _free_entry(self, color, direction, state, record):
+        pre = self.planner.precontact(color, direction, state["sliders_x_mm"], state["q_rad"])
+        state["q_rad"] = self._move(self.planner.free(state["q_rad"], pre,
+            state["sliders_x_mm"], direction=direction), record)
 
     def _push_with_corrections(self, color, goal, direction, state, record):
         sign = 1 if direction == "+x" else -1
@@ -294,9 +306,7 @@ class TaskRunner:
                 direction = "+x" if goal > start else "-x"
                 self.tool_direction = direction
                 def free(stage_attempt):
-                    pre = self.planner.precontact(color, direction, state["sliders_x_mm"], state["q_rad"])
-                    state["q_rad"] = self._move(self.planner.free(state["q_rad"], pre,
-                        state["sliders_x_mm"], direction=direction), stage_attempt)
+                    self._free_entry(color, direction, state, stage_attempt)
                 self._stage("free", state, attempt, free)
                 self.contact = color, direction
                 self.withdraw_extension_mm = 0.
