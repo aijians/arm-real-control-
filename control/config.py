@@ -96,6 +96,7 @@ def _apply_effective_motor_limits(config):
     calibrate this mapping only; geometry and scene limits stay unchanged.
     robot.json keeps the physical model limits, so reloading a new offset
     always starts from the same limits rather than accumulating corrections.
+    Timed A4 preserves that signed interval; legacy A6 clips to its wire range.
     """
     for motor in config["hardware"]["motors"]:
         limits = motor["limits_deg"]
@@ -107,6 +108,10 @@ def _apply_effective_motor_limits(config):
             raise ValueError("nonfinite or nonnumeric motor angle mapping")
         if sign not in (-1, 1) or ratio <= 0 or limits[0] >= limits[1]:
             raise ValueError("invalid motor angle mapping or limits")
+        # A4 accepts signed targets. Preserve physical limits rather than
+        # silently clipping a negative model boundary to A6's zero boundary.
+        if config["hardware"].get("free_timed_motion", {}).get("enabled", False):
+            continue
         scale = sign * ratio
         protocol = sorted(((0.0 - offset) / scale,
                            (359.99 - offset) / scale))

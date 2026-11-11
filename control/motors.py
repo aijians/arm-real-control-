@@ -393,9 +393,13 @@ class MotorPair:
             if motor["ratio"] <= 0 or len(limits) != 2 or limits[0] >= limits[1]:
                 raise ValueError("Invalid ratio or joint limits")
             motor["limits_deg"] = limits
-            for value in limits:
-                if not 0 <= self._motor_deg(motor, value) <= 359.99:
-                    raise ValueError("Configured mapping exceeds A6 single-turn range")
+            mapped = [self._motor_deg(motor, value) for value in limits]
+            if self.free_timed:
+                if (abs(mapped[1] - mapped[0]) >= 360
+                        or any(not -(1 << 63) <= round(value * 100) < (1 << 63) for value in mapped)):
+                    raise ValueError("A4 limits require signed targets and unambiguous single-turn feedback")
+            elif any(not 0 <= value <= 359.99 for value in mapped):
+                raise ValueError("Configured mapping exceeds A6 single-turn range")
         if os.path.realpath(self.motors[0]["device"]) == os.path.realpath(self.motors[1]["device"]):
             raise ValueError("The two independent motors require distinct serial devices")
         self.ports = [_Port(m["device"], int(self.config["baudrate"])) for m in self.motors]
@@ -554,16 +558,25 @@ class MotorPair:
                         "feedback": "angle" if key == "angle_stamp" else "speed",
                         "allowed_age_s": timeout})
             scale = motor["sign"] * motor["ratio"]
-            angle = (reply["motor_deg"] - motor["offset_deg"]) / scale
+            mapped = reply["motor_deg"]
+            angle = (mapped - motor["offset_deg"]) / scale
+            lo, hi = motor["limits_deg"]
+            if self.free_timed and not lo - .02 <= angle <= hi + .02:
+                # Select the unique equivalent single-turn reading within
+                # the configured interval, e.g. 359.5 becomes -0.5 degrees.
+                middle = self._motor_deg(motor, (lo + hi) / 2)
+                mapped += 360 * round((middle - mapped) / 360)
+                angle = (mapped - motor["offset_deg"]) / scale
             if not motor["limits_deg"][0] - .02 <= angle <= motor["limits_deg"][1] + .02:
                 raise HardwareError("joint_feedback_out_of_limits", {"motor": motor["name"], "model_deg": angle})
-            motor_angles.append(reply["motor_deg"])
+            motor_angles.append(mapped)
             angles.append(math.radians(angle))
             speeds.append(math.radians(reply["speed_deg_s"] / scale))
             axis_stamps.append(min(reply["angle_stamp"], reply["speed_stamp"]))
             speed_stamps.append(reply["speed_stamp"])
         selected = [stamp for stamp, active in zip(axis_stamps, self._active_axes) if active]
         return {"q_rad": angles, "speed_rad_s": speeds, "motor_deg": motor_angles,
+                "raw_motor_deg": [reply.get("motor_deg") for reply in self._feedback],
                 "axis_stamp_monotonic_s": axis_stamps,
                 "speed_stamp_monotonic_s": speed_stamps,
                 "stamp_monotonic_s": min(selected or axis_stamps)}
@@ -674,6 +687,7 @@ class MotorPair:
         return result
 
     def _validate_phase(self, phase):
+        timed = self.free_timed and phase.get("phase") in ("free", "push", "push_correction")
         points = phase.get("points")
         if not isinstance(points, list) or not points:
             raise ValueError("Phase requires a non-empty points list")
@@ -691,7 +705,10 @@ class MotorPair:
                     raise ValueError("Target outside model joint limits: " + motor["name"])
                 # Validate centidegree quantization as well as the float input.
                 centi = round(self._motor_deg(motor, deg) * 100)
-                if not 0 <= centi <= 35999:
+                if timed:
+                    if not -(1 << 63) <= centi < (1 << 63):
+                        raise ValueError("Mapped target outside A4 range")
+                elif not 0 <= centi <= 35999:
                     raise ValueError("Mapped target outside A6 range")
             if result:
                 dt = stamp - result[-1][0]
