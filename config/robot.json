@@ -207,7 +207,7 @@
           0.637538636371788,
           -0.7704183844724899
         ],
-        "approach_offset_mm": 10.0,
+        "approach_offset_mm": 5.0,
         "contact_segment_canonical_xy_mm": [
           [
             107.63,
