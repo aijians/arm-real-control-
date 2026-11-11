@@ -6,7 +6,7 @@
 
 ## Free / Push 多圈绝对位置定时基线（2026-11-10）
 
-当前 `hardware.free_timed_motion.enabled=true`，Free、Push 及 push_correction 共用该配置和执行器。Free 包括自由进场及通过 Planner.free 生成的返回路线；上述阶段均沿原关节折线细分，每轴相邻模型目标最多 `max_step_deg=0.2°`，每个后继点间隔 `period_s=0.05` 秒。保留原路径顶点、拐点及最终目标，重新生成时间；没有额外的 2°/秒路段速度限制。P0 只核对起点，之后每组向两轴各发送一条 A4 多圈绝对位置命令，驱动速度字段：Push（含 push_correction）大臂为 `push_upper_speed_deg_s=60`，小臂及 Free 两轴沿用 `speed_deg_s=30`（电机轴 °/s）。
+当前 `hardware.free_timed_motion.enabled=true`，Free、Push 及 push_correction 共用该配置和执行器。Free 包括自由进场及通过 Planner.free 生成的返回路线；上述阶段均沿原关节折线细分，每轴相邻模型目标最多 `max_step_deg=0.2°`，每个后继点间隔 `period_s=0.05` 秒。保留原路径顶点、拐点及最终目标，重新生成时间；没有额外的 2°/秒路段速度限制。P0 只核对起点，之后每组向两轴各发送一条 A4 多圈绝对位置命令，驱动速度字段：Push（含 push_correction）大臂为 `push_upper_speed_deg_s=60`，小臂及 Free 两轴使用 `speed_deg_s=60`（电机轴 °/s）。
 
 按用户确认的坐标关系，多圈电机角与当前单圈电机角直接对应，例如电机单圈160°即多圈160°。模型角仍使用既有 sign/ratio/offset 换算；不另加圈数偏移。A4 由驱动决定方向，Free / Push 不使用 A6 方向判断、方向余量或 `free_timed_direction_ambiguous` 分支。
 
