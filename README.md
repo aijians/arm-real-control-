@@ -14,6 +14,8 @@
 
 全部点发送完后才验收终点：两轴误差≤0.3°、速度≤1°/秒，稳定0.3秒后保持1秒；角度在容差内且相对上一合格反馈变化小于0.05°时，单次速度跳变不重置计时，恢复正常后沿用原计时；同轴连续不同超速样本或角度越界仍重置，硬限异常仍失败；保留5秒整定预算。各阶段失败后先停止并确认停稳，再按最新视觉和实测关节重新规划；每阶段首次执行后最多重试3次（共4次），互不占用次数。停止未确认、主动停止、硬限异常或滑杆超调直接终止。`motion_diagnostics.execution` 记录对应阶段的 `controller=free_timed/push_timed/push_correction_timed`、`position_command=0xa4`、步长、周期、schedule、中途 feedback_samples 及截断数；保留原动作末256条格式。
 
+Free 终点增加有限的原目标重申（2026-11-11 候选，待实机验证）：`hardware.free_timed_motion.goal_refresh.enabled=true`。仅在全部路径点已发送、尚未进入保持阶段时，逐轴观察新鲜角度及速度反馈；误差超过0.3°、速度≤1°/秒，连续0.6秒角度范围小于0.05°，才对该轴重发完全相同的最终A4目标和原速度字段，每轴最多2次。到位轴不重发；重发后重新等待该轴角度/速度新反馈，原5秒整定截止时间不延长。中途路径发送与阶段重试规则保持，Push/补推不启用这项措施。诊断中的 `goal_refresh` 记录每轴次数、时刻和重发前角差，动作的 `purpose=goal_refresh` 用于区分轨迹目标；`motion_commands_sent` 包含重发，`waypoints_dispatched` 只计路径点。它用于处理静止欠角时的终点重定位，不保证能够克服机构摩擦，也不是已确认的故障根因修复。离线验证：`PYTHONPATH=.:tests python3 -m unittest test_goal_refresh test_free_timed -q`。
+
 撤离等其它阶段沿用原 A6 执行器。用户已报告 Free 实机通过；本次扩展后的 Push 尚未试动。
 
 离线验证：`PYTHONPATH=.:tests python3 -m unittest discover -s tests -p test_free_timed.py -v`。旧版完整测试集的已知失败见交接记录，不能把虚拟回放写成实机通过。

@@ -19,6 +19,7 @@ from .trajectory import WaypointCursor, GoalQualification, timed_free_points
 from .kinematics import PlanarArm
 from .recovery import SpeedRecovery, recovery_settings
 from .motion_policy import MotionRecovery, motion_policy_settings
+from .goal_refresh import StationaryGoalRefresh, goal_refresh_settings
 
 from .protocol import (angle_from_reply, extract_frame, make_frame,
                        position_frame, multi_turn_position_frame, state_from_reply)
@@ -342,6 +343,7 @@ class MotorPair:
         if not isinstance(timed, dict) or type(timed.get("enabled", False)) is not bool:
             raise ValueError("invalid free_timed_motion.enabled")
         self.free_timed = timed.get("enabled", False)
+        self.goal_refresh = goal_refresh_settings(timed)
         self.free_timed_speed = _finite(timed.get("speed_deg_s", 10.),
                                         "free_timed_motion.speed_deg_s")
         # Free has its own fixed A4 speed, independent of the legacy executor cap.
@@ -1107,11 +1109,13 @@ class MotorPair:
             return self.push_upper_speed
         return self.free_timed_speed
 
-    def _send_timed_target(self, q_rad, trace):
-        """Write both absolute A4 targets, without consulting tracking feedback."""
+    def _send_timed_target(self, q_rad, trace, *, axes=None, purpose="trajectory"):
+        """Write selected absolute A4 targets without changing angle or speed."""
         sent = 0
         with self._io_lock:
             for i, (motor, port, q) in enumerate(zip(self.motors, self.ports, q_rad)):
+                if axes is not None and i not in axes:
+                    continue
                 if self._halt_event.is_set():
                     raise HardwareError("motion_halted")
                 target = round(self._motor_deg(motor, math.degrees(q)) * 100)
@@ -1122,6 +1126,7 @@ class MotorPair:
                          "command": "0xa4", "target_motor_deg": target/100,
                          "nominal_target_motor_deg": target/100,
                          "speed_limit_deg_s": speed_deg_s,
+                         "purpose": purpose,
                          "bias_motor_deg": 0., "tx_hex": wire.hex(" ")}
                 try:
                     port.send(wire, cancel_event=self._halt_event)
@@ -1156,6 +1161,10 @@ class MotorPair:
         self._motion_trace = trace
         state = target = elapsed = None
         sent_count = 0
+        refresh_events = []
+        refresh = StationaryGoalRefresh(self.goal_refresh,
+            self.config["angle_tolerance_deg"], self.config["still_speed_deg_s"], 2)
+        refresh_enabled = self.goal_refresh["enabled"] and name == "free" and len(points) > 1
         samples, schedule = deque(maxlen=10000), []
         sample_count = 0
         trace.execution.update(controller=controller, stage="tracking",
@@ -1166,6 +1175,8 @@ class MotorPair:
                                max_step_deg=self.free_timed_step,
                                period_s=self.free_timed_period,
                                automatic_retry=False, schedule=schedule)
+        trace.execution["goal_refresh"] = dict(self.goal_refresh,
+            active=refresh_enabled, attempts=refresh.attempts, events=refresh_events)
         try:
             state = self._read_state()
             if any(abs(math.degrees(a-b)) > self.config["angle_tolerance_deg"]
@@ -1180,6 +1191,7 @@ class MotorPair:
             dispatch_period = max(self.free_timed_period, 1/self.config["command_rate_hz"])
             last_write = started - dispatch_period
             end_at = None
+            confirmation_after = None
             qualifier = GoalQualification(self.config["angle_tolerance_deg"],
                 self.config["still_speed_deg_s"], self.config["goal_hold_s"], self.config["stable_s"])
             deadline = started + points[-1][0] + self.config["move_timeout_margin_s"]
@@ -1227,8 +1239,11 @@ class MotorPair:
                         end_at = time.monotonic()
                         target, elapsed = points[-1][1], points[-1][0]
                         trace.execution.update(stage="settling", dispatch_completed_elapsed_s=end_at-started)
+                        confirmation_after = [end_at, end_at]
                     state = self._snapshot()
-                    ready = all(t >= end_at for t in state["axis_stamp_monotonic_s"])
+                    ready = all(min(a, v) >= after for a, v, after in zip(
+                        state["axis_stamp_monotonic_s"], state["speed_stamp_monotonic_s"],
+                        confirmation_after))
                     completed = qualifier.observe(state, target, ready)
                     trace.execution.update(goal_stable_s=qualifier.stable_s,
                         goal_stability_resets=qualifier.resets,
@@ -1251,6 +1266,23 @@ class MotorPair:
                     if time.monotonic() >= end_at + self.config["goal_settle_timeout_s"] + self.config["goal_hold_s"]:
                         raise HardwareError("motion_goal_hold_timeout" if qualifier.armed
                                             else "motion_goal_settle_timeout")
+                    if refresh_enabled and not qualifier.armed:
+                        axes = refresh.observe(state, target, confirmation_after)
+                        if axes:
+                            before = time.monotonic()
+                            written = self._send_timed_target(target, trace,
+                                axes=axes, purpose="goal_refresh")
+                            sent_count += written
+                            refresh.sent(axes)
+                            for i in axes:
+                                confirmation_after[i] = time.monotonic()
+                            qualifier.reset_after_command()
+                            refresh_events.append({"write_started_elapsed_s": before-started,
+                                "write_completed_elapsed_s": time.monotonic()-started,
+                                "axes": [self.motors[i]["name"] for i in axes],
+                                "error_before_deg": [math.degrees(target[i]-state["q_rad"][i])
+                                                     for i in axes]})
+                            trace.execution["motion_commands_sent"] = sent_count
                 wait_s = .005
                 if index < len(points):
                     due = max(started+points[index][0], last_write+dispatch_period)

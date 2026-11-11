@@ -134,7 +134,13 @@
       "speed_deg_s": 60.0,
       "push_upper_speed_deg_s": 60.0,
       "max_step_deg": 0.2,
-      "period_s": 0.05
+      "period_s": 0.05,
+      "goal_refresh": {
+        "enabled": true,
+        "stationary_s": 0.6,
+        "progress_deg": 0.05,
+        "max_attempts": 2
+      }
     }
   },
   "verification": {
