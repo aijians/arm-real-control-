@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from control.config import load_config
 from .service import AXIS_LABELS, Tuner, selected_motor
+from .dual import DualTuner
 from .exclusive import isolate_sal
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -56,8 +57,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Cache-Control', 'no-store')
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('Referrer-Policy', 'no-referrer')
-        self.send_header('X-Frame-Options', 'DENY')
-        self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'")
+        self.send_header('X-Frame-Options', 'SAMEORIGIN')
+        self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'self'")
         if filename:
             self.send_header('Content-Disposition', 'attachment; filename="'+filename+'"')
         self.end_headers()
@@ -81,7 +82,13 @@ class Handler(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         assets = {'/': ('index.html', 'text/html; charset=utf-8'),
                   '/style.css': ('style.css', 'text/css; charset=utf-8'),
-                  '/app.js': ('app.js', 'application/javascript; charset=utf-8')}
+                  '/app.js': ('app.js', 'application/javascript; charset=utf-8'),
+                  '/dual.js': ('dual.js', 'application/javascript; charset=utf-8'),
+                  '/dual.css': ('dual.css', 'text/css; charset=utf-8')}
+        if isinstance(self.server.tuner, DualTuner):
+            assets['/'] = ('dual.html', 'text/html; charset=utf-8')
+            for axis in AXIS_LABELS:
+                assets['/axis/' + axis] = ('index.html', 'text/html; charset=utf-8')
         if path in assets:
             name, mime = assets[path]
             try:
@@ -95,17 +102,27 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authorized():
             return
         try:
+            if path == '/api/dual/state' and isinstance(self.server.tuner, DualTuner):
+                self._reply(200, self.server.tuner.state())
+                return
+            tuner = self._axis_tuner()
             if path == '/api/state':
                 since = int(parse_qs(urlsplit(self.path).query).get('since', ['0'])[0])
-                self._reply(200, self.server.tuner.state(max(0, since)))
+                self._reply(200, tuner.state(max(0, since)))
             elif path == '/api/export.json':
-                self._reply(200, self.server.tuner.export(), filename='pid-session.json')
+                self._reply(200, tuner.export(), filename='pid-session.json')
             elif path == '/api/export.csv':
-                self._reply(200, self.server.tuner.csv(), 'text/csv; charset=utf-8', 'pid-telemetry.csv')
+                self._reply(200, tuner.csv(), 'text/csv; charset=utf-8', 'pid-telemetry.csv')
             else:
                 self._reply(404, {'ok': False, 'error': '路径不存在'})
         except (ValueError, TypeError) as exc:
             self._reply(400, {'ok': False, 'error': str(exc)})
+
+    def _axis_tuner(self):
+        if isinstance(self.server.tuner, DualTuner):
+            axis = parse_qs(urlsplit(self.path).query).get('axis', ['upper'])[0]
+            return self.server.tuner.select(axis)
+        return self.server.tuner
 
     def do_POST(self):
         if not self._authorized():
@@ -120,7 +137,22 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(body, dict):
                 raise ValueError('请求必须是JSON对象')
             path = urlsplit(self.path).path
-            tuner = self.server.tuner
+            if path.startswith('/api/dual/') and isinstance(self.server.tuner, DualTuner):
+                dual = self.server.tuner
+                actions = {'/api/dual/connect': (set(), dual.connect_all),
+                           '/api/dual/disconnect': (set(), dual.disconnect_all),
+                           '/api/dual/stop': (set(), dual.stop_all),
+                           '/api/dual/move': ({'targets'}, lambda: dual.move_both(body['targets']))}
+                if path not in actions:
+                    self._reply(404, {'ok': False, 'error': '路径不存在'})
+                    return
+                keys, action = actions[path]
+                if set(body) != keys:
+                    raise ValueError('双轴请求字段不匹配')
+                action()
+                self._reply(200, {'ok': True})
+                return
+            tuner = self._axis_tuner()
             actions = {'/api/connect': (set(), lambda: tuner.connect()),
                        '/api/diagnose': (set(), lambda: tuner.diagnose()),
                        '/api/disconnect': (set(), lambda: tuner.disconnect()),
@@ -131,6 +163,9 @@ class Handler(BaseHTTPRequestHandler):
                        '/api/enable': ({'confirm'}, lambda: tuner.enable(body['confirm'])),
                        '/api/move': ({'target_deg', 'speed_deg_s'}, lambda: tuner.move(body['target_deg'], body['speed_deg_s'])),
                        '/api/stop': (set(), lambda: tuner.stop())}
+            if isinstance(self.server.tuner, DualTuner):
+                actions['/api/stop'] = (set(), lambda: self.server.tuner.stop_axis(tuner.axis))
+                actions['/api/disconnect'] = (set(), lambda: self.server.tuner.disconnect_axis(tuner.axis))
             if path not in actions:
                 self._reply(404, {'ok': False, 'error': '路径不存在'})
                 return
@@ -155,8 +190,8 @@ def main():
     mode.add_argument('--demo', action='store_true', help='演示模式（默认，无硬件访问）')
     parser.add_argument('--host', default='127.0.0.1', help='局域网访问时使用0.0.0.0')
     parser.add_argument('--port', type=int, default=8765)
-    parser.add_argument('--axis', choices=tuple(AXIS_LABELS), default='upper',
-                        help='选择关节：upper大臂（默认），lower小臂；切换需重启工具')
+    parser.add_argument('--axis', choices=('both', *AXIS_LABELS), default='both',
+                        help='both双轴（默认），或upper大臂/lower小臂单轴模式')
     parser.add_argument('--device', help='覆盖所选关节串口，如/dev/ttyUSB0')
     parser.add_argument('--motor-id', type=int, help='覆盖所选关节ID，1..32')
     parser.add_argument('--pause-sal', action='store_true', help='临时暂停板端sal串口扫描，退出时自动恢复（仅实机）')
@@ -164,8 +199,12 @@ def main():
     if args.pause_sal and not args.real:
         parser.error('--pause-sal只能与--real一起使用')
     config, paths = load_config(ROOT)
+    axes = tuple(AXIS_LABELS) if args.axis == 'both' else (args.axis,)
+    if args.axis == 'both' and (args.device or args.motor_id is not None):
+        parser.error('双轴模式使用robot.json中的两路设备；--device/--motor-id需指定--axis upper或lower')
     try:
-        motor = selected_motor(config, args.axis)
+        motors = [selected_motor(config, axis) for axis in axes]
+        motor = motors[0]
     except ValueError as exc:
         parser.error(str(exc))
     if args.device:
@@ -177,14 +216,16 @@ def main():
     if not 0 <= args.port <= 65535:
         parser.error('--port必须为0..65535')
     token = secrets.token_urlsafe(32)
-    tuner = Tuner(config, paths, mode='real' if args.real else 'demo', axis=args.axis)
+    tuner = (DualTuner(config, paths, mode='real' if args.real else 'demo') if args.axis == 'both'
+             else Tuner(config, paths, mode='real' if args.real else 'demo', axis=args.axis))
     server = None
-    isolation = isolate_sal([motor['device']]) if args.pause_sal else nullcontext()
+    isolation = isolate_sal([item['device'] for item in motors]) if args.pause_sal else nullcontext()
     # Bind first: a port conflict must never leave the scanner suspended.
     try:
         server = TunerServer((args.host, args.port), tuner, token)
         host = args.host if args.host not in ('0.0.0.0', '::') else '<开发板IP>'
-        print(AXIS_LABELS[args.axis]+f'PID调参台 [{args.axis}] {motor["device"]} ID{motor["id"]} / '+('真实设备模式，点击连接前不会打开串口' if args.real else '演示模式，无硬件访问'), flush=True)
+        description = ' + '.join(AXIS_LABELS[axis] + f' {item["device"]} ID{item["id"]}' for axis, item in zip(axes, motors))
+        print(f'PID调参台 [{args.axis}] '+description+' / '+('真实设备模式，点击连接前不会打开串口' if args.real else '演示模式，无硬件访问'), flush=True)
         print(f'打开完整链接：http://{host}:{server.server_port}/#token={token}', flush=True)
         print('停止服务：Ctrl+C。实机模式请先退出主控制程序，串口不能共享。', flush=True)
         def stop(signum, frame):

@@ -2,6 +2,8 @@
 
 (() => {
   const $ = id => document.getElementById(id);
+  const panelAxis = location.pathname.match(/^\/axis\/(upper|lower)$/)?.[1];
+  if (panelAxis) document.querySelector('.brand').target = '_top';
   const loops = ['angle', 'speed'];
   const gains = ['kp', 'ki', 'kd'];
   const drafts = {angle: {initialized: false, dirty: false}, speed: {initialized: false, dirty: false}};
@@ -67,6 +69,7 @@
   }
 
   async function request(path, data, options = {}) {
+    if (panelAxis) path += `${path.includes('?') ? '&' : '?'}axis=${panelAxis}`;
     let response;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), options.timeout || 12000);
@@ -700,7 +703,7 @@
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
-      link.download = `arm-pid-${new Date().toISOString().replace(/[:.]/g, '-')}.${kind}`;
+      link.download = `arm-pid-${state?.connection?.axis || "axis"}-${new Date().toISOString().replace(/[:.]/g, '-')}.${kind}`;
       document.body.append(link);
       link.click();
       link.remove();

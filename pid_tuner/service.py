@@ -63,7 +63,7 @@ def selected_motor(config, axis):
 
 
 class Tuner:
-    def __init__(self, config, paths, mode='demo', device_factory=None, start_worker=True, axis='upper'):
+    def __init__(self, config, paths, mode='demo', device_factory=None, start_worker=True, axis='upper', lock_factory=None):
         motor = selected_motor(config, axis)
         self.axis, self.axis_label = axis, AXIS_LABELS[axis]
         self.mode = mode
@@ -86,6 +86,7 @@ class Tuner:
         self._stop_generation = 0
         self._device = None
         self._instance_lock = None
+        self._lock_factory = lock_factory or instance_lock
         self.connected = False
         self.session_id = None
         self.params, self.baseline, self._baseline_raw, self._ram = {}, {}, {}, {}
@@ -175,7 +176,7 @@ class Tuner:
             opened, phase = False, 'opening'
             try:
                 if self.mode == 'real':
-                    self._instance_lock = instance_lock(self.runtime_dir)
+                    self._instance_lock = self._lock_factory(self.runtime_dir)
                     self._instance_lock.__enter__()
                 self._device = self.factory(self.connection, self.log)
                 self._device.open()
@@ -235,7 +236,7 @@ class Tuner:
             try:
                 if temporary:
                     if self.mode == 'real':
-                        self._instance_lock = instance_lock(self.runtime_dir)
+                        self._instance_lock = self._lock_factory(self.runtime_dir)
                         self._instance_lock.__enter__()
                     self._device = self.factory(self.connection, self.log)
                     self._device.open()
@@ -257,12 +258,14 @@ class Tuner:
             self._persist()
 
     def _release(self):
-        if self._device is not None:
-            self._device.close()
+        try:
+            if self._device is not None:
+                self._device.close()
+        finally:
             self._device = None
-        if self._instance_lock is not None:
-            self._instance_lock.__exit__(None, None, None)
-            self._instance_lock = None
+            if self._instance_lock is not None:
+                self._instance_lock.__exit__(None, None, None)
+                self._instance_lock = None
 
     def disconnect(self):
         with self._ops:
@@ -520,7 +523,7 @@ class Tuner:
             self._event(f'已显式发送{self.axis_label}使能命令0x88')
             self._persist()
 
-    def move(self, target_deg, speed_deg_s):
+    def move(self, target_deg, speed_deg_s, *, start_gate=None):
         generation = self._stop_generation
         target = number(target_deg, '目标角度')
         speed = number(speed_deg_s, '试转速度')
@@ -528,6 +531,12 @@ class Tuner:
             raise ValueError(f'目标角度超出{self.axis_label}配置限位')
         if not 0 < speed <= self.limits['max_test_speed_deg_s']:
             raise ValueError('试转速度必须大于0且不超过60°/s')
+        motor_target = round((self.connection['offset_deg'] + self.connection['sign']
+                              * self.connection['ratio'] * target) * 100)
+        if not 0 <= motor_target <= 35999:
+            raise ValueError('电机目标超出本调参台A6单圈范围，不能下发负角目标')
+        if round(speed * self.connection['ratio'] * 100) > 36000:
+            raise ValueError('电机轴速度超出本工具支持范围')
         with self._ops:
             self._require()
             self._check_cancel()
@@ -601,6 +610,9 @@ class Tuner:
             try:
                 self._persist()  # Record ownership before the motion command can take effect.
                 self._check_cancel(generation)
+                if start_gate is not None:
+                    start_gate()
+                    self._check_cancel(generation)
                 self._device.move(target, speed, row['motor_angle_deg'])
             except BaseException:
                 self.motion.update(trial_outcome='failed', stop_reason='试转命令未确认')

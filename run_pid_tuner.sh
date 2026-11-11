@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# 默认同时管理大臂/小臂；--axis upper 或 --axis lower 保留单轴模式。
 PID_TUNER_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PID_TUNER_PYTHON="$(/usr/bin/python3 - "$PID_TUNER_ROOT" <<'PY'
 import json
