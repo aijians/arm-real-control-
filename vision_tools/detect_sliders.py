@@ -1,22 +1,19 @@
 #!/usr/bin/env python3
-"""蓝色滑杆与橙色滑杆像素位置及导轨真实端点识别脚本（支持地面仿真 ground 与真实目标 real 场景）。
+"""蓝色滑杆与橙色(黄色)滑杆像素位置及导轨真实端点识别脚本（支持 ground 与 real 场景）。
 
-核心算法与工程接口设计：
-1. 自动白色导轨直线拟合与真实两端点检测（方案 C + 真实槽端点定位）：
-   - 在导轨走廊内通过竖直梯度峰值 + 抛物线亚像素插值 + Huber IRLS 自动拟合导轨槽线 y = k * x + m；
-   - 沿拟合出的导轨直线提取一维法向边缘强度剖面 E(x)，通过补零一维形态学闭运算（跨越滑杆遮挡区）
-     与线性亚像素阈值插值，直接定位导轨真实左端点与右端点作为输出 `rail_endpoints_px`。
-2. 四重抗高光分裂与稳健轴线提取机制：
-   - 曲面高光物理补偿掩膜：识别蓝色圆柱表面因 B 通道饱和 (B=255) 导致色相略偏青 (H∈[90,99))
-     但红通道极低 (S>=165, B-R>=150) 的中央高光竖条，避免在掩膜阶段将圆柱一分为二；
-   - 横向各向异性闭运算：对上端圆柱杆区域执行 (15, 3) 水平形态学闭运算，横向弥合极端纯白反光缝隙；
-   - 上下刚体耦合与碎片归并：以大面积下端滑块 (block) 锁定水平走廊，自动合并同一高度层内被高光
-     切开的左右半圆柱连通块，杜绝单取最大连通域时“丢掉半边圆柱”引起的跳变；
-   - 逐行外轮廓对称中点中位数：在圆柱主体段（15%~70%高度）逐行取左、右外轮廓边界中点
-     0.5 * (x_left + x_right)，过滤残缺窄行后取中位数作为轴线 X 坐标，完全不受内部空洞影响。
-3. 统一正向像素坐标系与全流程接口兼容：
-   - real 场景在输入时自动旋转 180° 转正，输出使用转正后的像素坐标系（不表示可共享ground的相机外参）；
-   - 同时支持 `profile` 与 `scene` 参数名，输出结构完整兼容 `pixel_to_world.convert_detections` 与 `vision.Vision`。
+核心算法与工程修复说明：
+1. 先掩膜屏蔽滑杆、再拟合外侧前挡边下沿直线（修复初始姿态斜率 0.333 偏斜问题）：
+   - 先提取蓝、橙滑杆颜色掩膜并做形态学膨胀，在拟合导轨直线时彻底剔除滑杆遮挡列，
+     防止左端蓝杆轴环与右端黄杆方块把导轨直线斜率拉偏；
+   - 在未遮挡列中自上而下寻找第一个（最上层）“无色差灰白前挡边 -> 暗槽”的垂直梯度峰值（Peak 1），
+     严格锁定贯通全长的外侧前挡边下沿，避免误锁低 13~15 px 的槽内后壁反光台阶（Peak 2）；
+   - 引入基于相机-导轨刚性安装约束的斜率一致性护栏（|k - k_nom| <= max_slope_deviation），
+     当遮挡导致有效跨度较短或斜率异常时自动约束斜率并稳健重估截距 m；若有效点不足则返回 None。
+2. 一维剖面水平平滑与物理端点校验（_detect_rail_endpoints）：
+   - 使用 (7, 1) 高斯核沿一维剖面水平长度方向平滑；
+   - 校验边缘下方确实进入暗槽/滑杆区（排除左侧 x < 446 实心灰色三角斜撑水平面）；
+   - 恢复 ROI 截断边界检查（idx_l == 0 或 idx_r == len - 1 时返回 None）与最小有效段长度检查，
+     绝不以先验扫描边界冒充实测物理端点。
 """
 
 import argparse
@@ -33,11 +30,13 @@ SCENES = {
         "canonical_size": (1920, 1080),
         "rotation_deg": 0,
         "roi": (260, 310, 690, 620),
-        "rail_x_range": (455, 660),
-        "rail_nominal": (465.0, 468.0, 0.225),
-        "rail_band_px": 30,
+        "rail_x_range": (445, 672),
+        "rail_nominal": (465.0, 458.0, 0.225),
+        "rail_band_px": 26,
+        "max_slope_deviation": 0.025,
         "lip_split_half_width": 6,
         "endpoint_edge_thresh": 28.0,
+        "min_endpoint_span_px": 180,
     },
     "real": {
         "canonical_size": (1920, 1080),
@@ -46,8 +45,10 @@ SCENES = {
         "rail_x_range": (465, 680),
         "rail_nominal": (480.0, 168.0, 0.650),
         "rail_band_px": 30,
+        "max_slope_deviation": 0.045,
         "lip_split_half_width": 6,
         "endpoint_edge_thresh": 28.0,
+        "min_endpoint_span_px": 150,
     },
 }
 
@@ -65,106 +66,6 @@ def _read_image(image_path):
     if image is None or image.size == 0:
         raise ValueError(f"Cannot decode image: {path}")
     return image
-
-
-def _detect_rail_line(work_img, cfg):
-    """在导轨走廊内自动提取白色导轨挡边/滑槽下沿直线 y = k * x + m（亚像素精度）。"""
-    gray = cv2.cvtColor(work_img, cv2.COLOR_BGR2GRAY).astype(np.float32)
-    gray_smooth = cv2.GaussianBlur(gray, (9, 5), 2.0, 1.0)
-    dy = cv2.Sobel(gray_smooth, cv2.CV_32F, 0, 1, ksize=3)
-
-    x_start, x_end = cfg["rail_x_range"]
-    x0, y0, k_nom = cfg["rail_nominal"]
-    half_band = cfg["rail_band_px"]
-    h = work_img.shape[0]
-
-    xs, ys, weights = [], [], []
-    for x in range(x_start, x_end):
-        yn = y0 + k_nom * (x - x0)
-        y1 = max(0, int(round(yn - half_band)))
-        y2 = min(h, int(round(yn + half_band)))
-        col_edge = -dy[y1:y2, x]
-        idx = int(np.argmax(col_edge))
-        strength = float(col_edge[idx])
-        if strength > 25.0:
-            if 0 < idx < len(col_edge) - 1:
-                ym, yc, yp = col_edge[idx - 1], col_edge[idx], col_edge[idx + 1]
-                denom = ym - 2.0 * yc + yp
-                offset = float(np.clip(0.5 * (ym - yp) / denom, -0.5, 0.5)) if abs(denom) > 1e-5 else 0.0
-            else:
-                offset = 0.0
-            xs.append(float(x))
-            ys.append(float(y1 + idx + offset))
-            weights.append(strength)
-
-    if len(xs) < 15:
-        raise ValueError("rail_line_not_detected")
-
-    xs_arr = np.asarray(xs, dtype=np.float64)
-    ys_arr = np.asarray(ys, dtype=np.float64)
-    w_arr = np.asarray(weights, dtype=np.float64)
-
-    k, m = np.polyfit(xs_arr, ys_arr, 1, w=w_arr)
-    for _ in range(5):
-        residual = np.abs(ys_arr - (k * xs_arr + m))
-        w_robust = w_arr / np.maximum(1.0, residual / 2.0)
-        k, m = np.polyfit(xs_arr, ys_arr, 1, w=w_robust)
-    return float(k), float(m)
-
-
-def _detect_rail_endpoints(work_img, k, m, cfg):
-    """沿已拟合的导轨直线 y = k * x + m 扫描一维梯度剖面，亚像素定位真实导轨左、右端点。"""
-    gray = cv2.cvtColor(work_img, cv2.COLOR_BGR2GRAY).astype(np.float32)
-    gray_smooth = cv2.GaussianBlur(gray, (9, 5), 2.0, 1.0)
-    neg_dy = -cv2.Sobel(gray_smooth, cv2.CV_32F, 0, 1, ksize=3)
-
-    x1, _, x2, _ = cfg["roi"]
-    h = work_img.shape[0]
-    xs = np.arange(x1, x2, dtype=np.int32)
-    e_prof = np.zeros(len(xs), dtype=np.float32)
-    for i, x in enumerate(xs):
-        yr = int(round(k * x + m))
-        by1 = max(0, yr - 6)
-        by2 = min(h, yr + 7)
-        if by2 > by1:
-            e_prof[i] = float(np.max(neg_dy[by1:by2, x]))
-
-    e_smooth = cv2.GaussianBlur(e_prof.reshape(1, -1), (7, 1), 1.5).ravel()
-    thresh = float(cfg.get("endpoint_edge_thresh", 28.0))
-    active = (e_smooth >= thresh).astype(np.uint8)
-
-    pad = 25
-    active_pad = np.pad(active, (pad, pad), mode="constant", constant_values=0)
-    closed_pad = cv2.morphologyEx(
-        active_pad.reshape(1, -1),
-        cv2.MORPH_CLOSE,
-        np.ones((1, 35), np.uint8),
-    ).ravel()
-    active_closed = closed_pad[pad:-pad]
-
-    nz = np.flatnonzero(active_closed)
-    if len(nz) < 20:
-        return None
-
-    splits = np.where(np.diff(nz) > 1)[0] + 1
-    best_seg = max(np.split(nz, splits), key=len)
-    idx_l, idx_r = int(best_seg[0]), int(best_seg[-1])
-    if len(best_seg) < 20 or idx_l == 0 or idx_r == len(xs) - 1:
-        return None
-
-    if idx_l > 0 and e_smooth[idx_l] > e_smooth[idx_l - 1]:
-        frac_l = (thresh - e_smooth[idx_l - 1]) / (e_smooth[idx_l] - e_smooth[idx_l - 1])
-        x_left = float(xs[idx_l - 1] + np.clip(frac_l, 0.0, 1.0))
-    else:
-        x_left = float(xs[idx_l])
-
-    if idx_r < len(xs) - 1 and e_smooth[idx_r] > e_smooth[idx_r + 1]:
-        frac_r = (e_smooth[idx_r] - thresh) / (e_smooth[idx_r] - e_smooth[idx_r + 1])
-        x_right = float(xs[idx_r] + np.clip(frac_r, 0.0, 1.0))
-    else:
-        x_right = float(xs[idx_r])
-
-    return (x_left, float(k * x_left + m)), (x_right, float(k * x_right + m))
 
 
 def _build_color_masks(patch):
@@ -198,6 +99,172 @@ def _build_color_masks(patch):
     blue_mask = cv2.morphologyEx(cv2.morphologyEx(blue_mask, cv2.MORPH_OPEN, k_open), cv2.MORPH_CLOSE, k_close)
     orange_mask = cv2.morphologyEx(cv2.morphologyEx(orange_mask, cv2.MORPH_OPEN, k_open), cv2.MORPH_CLOSE, k_close)
     return {"blue": blue_mask, "orange": orange_mask}
+
+
+def _detect_rail_line(work_img, cfg, masks=None):
+    """在剔除滑杆遮挡后的导轨走廊内提取外侧前挡边下沿直线 y = k * x + m；失败返回 (None, None)。"""
+    gray = cv2.cvtColor(work_img, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    gray_smooth = cv2.GaussianBlur(gray, (9, 5), 2.0, 1.0)
+    dy = cv2.Sobel(gray_smooth, cv2.CV_32F, 0, 1, ksize=3)
+    chroma = work_img.max(axis=2).astype(np.float32) - work_img.min(axis=2).astype(np.float32)
+
+    x1, y1, x2, y2 = cfg["roi"]
+    if masks is None:
+        masks = _build_color_masks(work_img[y1:y2, x1:x2])
+    slider_occ = cv2.dilate(masks["blue"] | masks["orange"], np.ones((19, 19), np.uint8))
+
+    x_start, x_end = cfg["rail_x_range"]
+    x0, y0, k_nom = cfg["rail_nominal"]
+    half_band = cfg["rail_band_px"]
+    h = work_img.shape[0]
+    is_ground = (cfg.get("rotation_deg", 0) == 0 and y0 > 350)
+
+    xs, ys, weights = [], [], []
+    for x in range(x_start, x_end):
+        yn = y0 + k_nom * (x - x0)
+        by1 = max(8, int(round(yn - half_band)))
+        by2 = min(h - 8, int(round(yn + half_band)))
+        col_edge = -dy[by1:by2, x]
+        if len(col_edge) < 3:
+            continue
+
+        chosen_idx = None
+        chosen_strength = 0.0
+        if is_ground:
+            # 自上而下寻找第一个“无色差明亮前挡边 -> 暗槽”梯度峰值（外侧前挡边下沿 Peak 1），
+            # 避免跳到下方 13~15 px 的槽内后壁反光台阶（Peak 2）或滑杆边缘。
+            for idx in range(1, len(col_edge) - 1):
+                strength = float(col_edge[idx])
+                if strength < 28.0 or strength < col_edge[idx - 1] or strength < col_edge[idx + 1]:
+                    continue
+                yg = by1 + idx
+                if y1 <= yg < y2 and x1 <= x < x2 and slider_occ[yg - y1, x - x1] > 0:
+                    continue
+                above_g = gray_smooth[yg - 7 : yg - 1, x]
+                below_g = gray_smooth[yg + 1 : yg + 6, x]
+                above_c = chroma[yg - 7 : yg, x]
+                if (len(above_g) > 0 and len(below_g) > 0
+                        and float(np.mean(above_g)) >= 135.0
+                        and float(np.min(above_g)) >= 110.0
+                        and float(np.mean(above_g)) - float(np.min(below_g)) >= 30.0
+                        and float(np.mean(above_c)) <= 45.0):
+                    chosen_idx = idx
+                    chosen_strength = strength
+                    break
+        else:
+            for idx in np.argsort(col_edge)[::-1]:
+                idx = int(idx)
+                strength = float(col_edge[idx])
+                if strength <= 25.0:
+                    break
+                yg = by1 + idx
+                if y1 <= yg < y2 and x1 <= x < x2 and slider_occ[yg - y1, x - x1] > 0:
+                    continue
+                chosen_idx = idx
+                chosen_strength = strength
+                break
+
+        if chosen_idx is not None:
+            if 0 < chosen_idx < len(col_edge) - 1:
+                ym, yc, yp = col_edge[chosen_idx - 1], col_edge[chosen_idx], col_edge[chosen_idx + 1]
+                denom = ym - 2.0 * yc + yp
+                offset = float(np.clip(0.5 * (ym - yp) / denom, -0.5, 0.5)) if abs(denom) > 1e-5 else 0.0
+            else:
+                offset = 0.0
+            xs.append(float(x))
+            ys.append(float(by1 + chosen_idx + offset))
+            weights.append(chosen_strength)
+
+    if len(xs) < 15:
+        return None, None
+
+    xs_arr = np.asarray(xs, dtype=np.float64)
+    ys_arr = np.asarray(ys, dtype=np.float64)
+    w_arr = np.asarray(weights, dtype=np.float64)
+
+    k, m = np.polyfit(xs_arr, ys_arr, 1, w=w_arr)
+    for _ in range(5):
+        residual = np.abs(ys_arr - (k * xs_arr + m))
+        w_robust = w_arr / np.maximum(1.0, residual / 1.5)
+        k, m = np.polyfit(xs_arr, ys_arr, 1, w=w_robust)
+
+    max_k_dev = float(cfg.get("max_slope_deviation", 0.025))
+    if abs(k - k_nom) > max_k_dev or (xs_arr.max() - xs_arr.min()) < 70.0:
+        k = float(np.clip(k, k_nom - max_k_dev, k_nom + max_k_dev))
+        m = float(np.median(ys_arr - k * xs_arr))
+
+    return float(k), float(m)
+
+
+def _detect_rail_endpoints(work_img, k, m, cfg):
+    """沿已拟合的导轨直线 y = k * x + m 扫描一维梯度剖面，亚像素定位真实左、右物理端点；不可靠时返回 None。"""
+    if k is None or m is None:
+        return None
+
+    gray = cv2.cvtColor(work_img, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    gray_smooth = cv2.GaussianBlur(gray, (9, 5), 2.0, 1.0)
+    neg_dy = -cv2.Sobel(gray_smooth, cv2.CV_32F, 0, 1, ksize=3)
+
+    x1, _, x2, _ = cfg["roi"]
+    h = work_img.shape[0]
+    xs = np.arange(x1, x2, dtype=np.int32)
+    e_prof = np.zeros(len(xs), dtype=np.float32)
+    for i, x in enumerate(xs):
+        yr = int(round(k * x + m))
+        by1 = max(8, yr - 6)
+        by2 = min(h - 12, yr + 7)
+        if by2 > by1:
+            col = neg_dy[by1:by2, x]
+            idx = int(np.argmax(col))
+            ypeak = by1 + idx
+            # 要求边沿下方确实比上方前挡边暗（过滤左侧实心灰色三角斜撑台面）
+            above_med = float(np.median(gray_smooth[ypeak - 6 : ypeak - 1, x]))
+            below_med = float(np.median(gray_smooth[ypeak + 3 : ypeak + 10, x]))
+            if above_med - below_med >= 15.0:
+                e_prof[i] = float(col[idx])
+
+    # OpenCV GaussianBlur 的 ksize=(width, height)：(7, 1) 表示沿 1xN 剖面的水平长度方向平滑
+    e_smooth = cv2.GaussianBlur(e_prof.reshape(1, -1), (7, 1), 1.5).ravel()
+    thresh = float(cfg.get("endpoint_edge_thresh", 28.0))
+    active = (e_smooth >= thresh).astype(np.uint8)
+
+    pad = 25
+    active_pad = np.pad(active, (pad, pad), mode="constant", constant_values=0)
+    closed_pad = cv2.morphologyEx(
+        active_pad.reshape(1, -1),
+        cv2.MORPH_CLOSE,
+        np.ones((1, 35), np.uint8),
+    ).ravel()
+    active_closed = closed_pad[pad:-pad]
+
+    nz = np.flatnonzero(active_closed)
+    min_span = int(cfg.get("min_endpoint_span_px", 150))
+    if len(nz) < min_span:
+        return None
+
+    splits = np.where(np.diff(nz) > 1)[0] + 1
+    best_seg = max(np.split(nz, splits), key=len)
+    if len(best_seg) < min_span:
+        return None
+
+    idx_l, idx_r = int(best_seg[0]), int(best_seg[-1])
+    # 防止 ROI 截断边界被当成物理端点
+    if idx_l <= 0 or idx_r >= len(xs) - 1:
+        return None
+
+    if idx_l > 0 and e_smooth[idx_l] > e_smooth[idx_l - 1]:
+        frac_l = (thresh - e_smooth[idx_l - 1]) / (e_smooth[idx_l] - e_smooth[idx_l - 1])
+        x_left = float(xs[idx_l - 1] + np.clip(frac_l, 0.0, 1.0))
+    else:
+        x_left = float(xs[idx_l])
+
+    if idx_r < len(xs) - 1 and e_smooth[idx_r] > e_smooth[idx_r + 1]:
+        frac_r = (e_smooth[idx_r] - thresh) / (e_smooth[idx_r] - e_smooth[idx_r + 1])
+        x_right = float(xs[idx_r] + np.clip(frac_r, 0.0, 1.0))
+    else:
+        x_right = float(xs[idx_r])
+
+    return (x_left, float(k * x_left + m)), (x_right, float(k * x_right + m))
 
 
 def _extract_merged_component(mask_part, offset_xy, min_area, ref_x_range=None, max_merge_gap=20):
@@ -273,7 +340,7 @@ def _compute_rod_axis_x(rod, offset_x):
 
 
 def _map_point(point, canonical_size, original_size):
-    """将标准尺度坐标按比例映射回输入图分辨率（保持转正后的正向像素坐标系，不做 180° 逆旋转）。"""
+    """将标准尺度坐标按比例映射回输入图分辨率（保持转正后的正向像素坐标系）。"""
     x, y = point
     cw, ch = canonical_size
     ow, oh = original_size
@@ -283,32 +350,22 @@ def _map_point(point, canonical_size, original_size):
     ]
 
 
-
-
-
 def detect_frame(image, profile="ground", scene=None, already_rotated=False):
-    """识别单帧 BGR 图像中的导轨真实两端点及蓝色、橙色滑杆坐标。
-
-    同时兼容 `profile`（供 vision.py 调用）与 `scene` 参数名。
-    """
-    active_scene = scene if scene is not None else profile
-    if active_scene not in SCENES:
-        raise ValueError(f"Unknown scene/profile {active_scene!r}; choose from {tuple(SCENES)}")
+    """识别单帧 BGR 图像中的导轨真实两端点及蓝色、橙(黄)色滑杆坐标。"""
+    active_profile = scene if scene is not None else profile
+    if active_profile not in SCENES:
+        raise ValueError(f"Unknown profile {active_profile!r}; choose from {tuple(SCENES)}")
     if (not isinstance(image, np.ndarray) or image.dtype != np.uint8
             or image.ndim != 3 or image.shape[2] != 3 or image.size == 0):
-        raise ValueError("Input must be a non-empty uint8 3-channel BGR image")
-    if not isinstance(already_rotated, bool):
-        raise ValueError("already_rotated must be a bool")
-    if scene is not None and profile != "ground" and scene != profile:
-        raise ValueError("scene and profile disagree")
+        raise ValueError("Frame must be a non-empty uint8 3-channel BGR image")
 
-    cfg = SCENES[active_scene]
+    cfg = SCENES[active_profile]
     cw, ch = cfg["canonical_size"]
     oh, ow = image.shape[:2]
     if abs(ow * ch - oh * cw) > max(cw, ch):
         raise ValueError(
-            f"Image aspect ratio {ow}x{oh} does not match {active_scene} ({cw}x{ch}); "
-            "use a full-frame 16:9 image."
+            f"Image aspect ratio {ow}x{oh} does not match profile {active_profile} ({cw}x{ch}); "
+            "use a full-frame proportional resize."
         )
     rotation = 0 if already_rotated else cfg["rotation_deg"]
 
@@ -316,76 +373,79 @@ def detect_frame(image, profile="ground", scene=None, already_rotated=False):
     if (ow, oh) != (cw, ch):
         work = cv2.resize(work, (cw, ch), interpolation=cv2.INTER_LINEAR)
 
-    # 1. 自动拟合白色导轨槽线 y = k * x + m，并检测导轨真实左、右物理端点
-    k, m = _detect_rail_line(work, cfg)
-    rail_endpoints = _detect_rail_endpoints(work, k, m, cfg)
-
-    # 2. 截取 ROI 并分割蓝、橙滑杆上端圆柱杆 (rod) 与下端滑块 (block)
+    # 1. 先提取 ROI 内的蓝、橙颜色掩膜，用于屏蔽滑杆遮挡后再拟合导轨直线
     x1, y1, x2, y2 = cfg["roi"]
     patch = work[y1:y2, x1:x2]
     masks = _build_color_masks(patch)
 
-    py, px = np.indices((y2 - y1, x2 - x1))
-    gx, gy = px + x1, py + y1
-    rail_y_grid = k * gx + m
-    half_lip = cfg["lip_split_half_width"]
-    k_rod_horiz_close = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 3))
-    k_block_open = np.ones((7, 7), np.uint8)
+    # 2. 剔除滑杆遮挡列，拟合外侧前挡边下沿直线 y = k * x + m 并检测真实物理端点
+    k, m = _detect_rail_line(work, cfg, masks=masks)
+    endpoints = _detect_rail_endpoints(work, k, m, cfg)
+    rail_endpoints_px = (
+        [_map_point(endpoints[0], (cw, ch), (ow, oh)),
+         _map_point(endpoints[1], (cw, ch), (ow, oh))]
+        if endpoints is not None else None
+    )
 
     sliders = {"blue": None, "yellow": None}
-    for color, mask in masks.items():
-        upper_raw = np.where(gy < rail_y_grid - half_lip, mask, 0).astype(np.uint8)
-        upper_mask = cv2.morphologyEx(upper_raw, cv2.MORPH_CLOSE, k_rod_horiz_close)
-        lower_mask = cv2.morphologyEx(
-            np.where(gy > rail_y_grid + half_lip, mask, 0).astype(np.uint8),
-            cv2.MORPH_OPEN,
-            k_block_open,
-        )
+    if k is not None and m is not None:
+        py, px = np.indices((y2 - y1, x2 - x1))
+        gx, gy = px + x1, py + y1
+        rail_y_grid = k * gx + m
+        half_lip = cfg["lip_split_half_width"]
+        k_rod_horiz_close = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 3))
+        k_block_open = np.ones((7, 7), np.uint8)
 
-        block = _extract_merged_component(lower_mask, (x1, y1), min_area=200)
-        ref_x = (block["bbox"][0], block["bbox"][2]) if block is not None else None
-        rod = _extract_merged_component(upper_mask, (x1, y1), min_area=120, ref_x_range=ref_x)
-        if rod is None and block is None:
-            continue
+        for mask_key, out_key in (("blue", "blue"), ("orange", "yellow")):
+            mask = masks[mask_key]
+            upper_raw = np.where(gy < rail_y_grid - half_lip, mask, 0).astype(np.uint8)
+            upper_mask = cv2.morphologyEx(upper_raw, cv2.MORPH_CLOSE, k_rod_horiz_close)
+            lower_mask = cv2.morphologyEx(
+                np.where(gy > rail_y_grid + half_lip, mask, 0).astype(np.uint8),
+                cv2.MORPH_OPEN,
+                k_block_open,
+            )
 
-        # 3. 逐行外轮廓对称中点中位数提取 x_axis
-        if rod is not None:
-            x_axis = _compute_rod_axis_x(rod, x1)
-            method = "rod_outer_midpoint_median_intersection"
-            is_approx = False
-        else:
-            x_axis = block["center"][0]
-            method = "block_center_projection_approximate"
-            is_approx = True
+            block = _extract_merged_component(lower_mask, (x1, y1), min_area=200)
+            ref_x = (block["bbox"][0], block["bbox"][2]) if block is not None else None
+            rod = _extract_merged_component(upper_mask, (x1, y1), min_area=120, ref_x_range=ref_x)
+            if rod is None and block is None:
+                continue
 
-        y_axis = float(k * x_axis + m)
+            if rod is not None:
+                x_axis = _compute_rod_axis_x(rod, x1)
+                method = "rod_outer_midpoint_median_intersection"
+                rep_part = "rod"
+                is_approx = False
+            else:
+                x_axis = block["center"][0]
+                method = "block_center_projection_approximate"
+                rep_part = "block"
+                is_approx = True
 
-        sliders["yellow" if color == "orange" else color] = {
-            "pixel_xy": _map_point((x_axis, y_axis), (cw, ch), (ow, oh)),
-            "reference_method": method,
-            "approximate": is_approx,
-        }
+            y_axis = float(k * x_axis + m)
+            sliders[out_key] = {
+                "pixel_xy": _map_point((x_axis, y_axis), (cw, ch), (ow, oh)),
+                "reference_method": method,
+                "representative_part": rep_part,
+                "approximate": is_approx,
+            }
 
     complete = sliders["blue"] is not None and sliders["yellow"] is not None
-
     return {
         "schema_version": 1,
-        "profile": active_scene,
+        "profile": active_profile,
         "input_size_px": [ow, oh],
         "status": "complete" if complete else "partial_or_missing",
         "position_definition": "shaft_axis_intersection_with_image_reference_line",
-        "pixel_coordinate_frame": "scene_upright",
-        "rail_endpoints_px": ([_map_point(p, (cw, ch), (ow, oh)) for p in rail_endpoints]
-                              if rail_endpoints is not None else None),
+        "rail_endpoints_px": rail_endpoints_px,
         "sliders": sliders,
     }
 
 
 def detect_sliders(image_path, profile="ground", scene=None, already_rotated=False):
     """读取图片文件并返回识别结果字典。"""
-    res = detect_frame(_read_image(image_path), profile=profile, scene=scene, already_rotated=already_rotated)
-    res["source_image"] = str(image_path)
-    return res
+    return detect_frame(_read_image(image_path), profile=profile, scene=scene, already_rotated=already_rotated)
 
 
 def _write_preview(image_path, output_path, result, already_rotated=False):
@@ -395,22 +455,15 @@ def _write_preview(image_path, output_path, result, already_rotated=False):
     if rotation == 180:
         image = cv2.rotate(image, cv2.ROTATE_180)
 
-    endpoints = result.get("rail_endpoints_px")
-    if endpoints:
-        cv2.line(image, tuple(round(x) for x in endpoints[0]), tuple(round(x) for x in endpoints[1]), (0, 255, 0), 2)
-    for ep, label in zip(endpoints or [], ("L", "R")):
-        ep = tuple(round(x) for x in ep)
-        cv2.circle(image, ep, 6, (0, 255, 255), -1)
-        cv2.circle(image, ep, 6, (0, 140, 0), 2)
-        cv2.putText(
-            image,
-            label,
-            (ep[0] - 6, ep[1] - 10),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (0, 255, 255),
-            2,
-        )
+    eps = result.get("rail_endpoints_px")
+    if isinstance(eps, (list, tuple)) and len(eps) == 2 and eps[0] is not None and eps[1] is not None:
+        pt0 = (round(eps[0][0]), round(eps[0][1]))
+        pt1 = (round(eps[1][0]), round(eps[1][1]))
+        cv2.line(image, pt0, pt1, (0, 255, 0), 2)
+        for ep, label in [(pt0, "L"), (pt1, "R")]:
+            cv2.circle(image, ep, 6, (0, 255, 255), -1)
+            cv2.circle(image, ep, 6, (0, 140, 0), 2)
+            cv2.putText(image, label, (ep[0] - 6, ep[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
 
     for color in ("blue", "yellow"):
         item = result["sliders"].get(color)
@@ -441,12 +494,12 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("image", help="Input image path")
     parser.add_argument(
-        "--scene",
         "--profile",
-        dest="scene",
+        "--scene",
+        dest="profile",
         choices=tuple(SCENES),
         default="ground",
-        help="Scene type: 'ground' (ground simulation) or 'real' (real target, rotated 180 deg internally)",
+        help="Profile type: 'ground' or 'real'",
     )
     parser.add_argument(
         "--already-rotated",
@@ -465,7 +518,7 @@ def main(argv=None):
         if len(output_paths) != len(set(output_paths)):
             raise ValueError("JSON output and preview must use different paths")
 
-        result = detect_sliders(args.image, profile=args.scene, already_rotated=args.already_rotated)
+        result = detect_sliders(args.image, profile=args.profile, already_rotated=args.already_rotated)
         if args.preview:
             _write_preview(args.image, args.preview, result, already_rotated=args.already_rotated)
 
