@@ -129,6 +129,17 @@
       ],
       "final_speed_deg_s": 90.0
     },
+    "task_start_pid": {
+      "enabled": true,
+      "upper": {
+        "angle": {"kp": 50, "ki": 10, "kd": 0},
+        "speed": {"kp": 750, "ki": 35, "kd": 0}
+      },
+      "lower": {
+        "angle": {"kp": 65, "ki": 10, "kd": 0},
+        "speed": {"kp": 600, "ki": 35, "kd": 0}
+      }
+    },
     "free_timed_motion": {
       "enabled": true,
       "speed_deg_s": 60.0,

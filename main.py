@@ -35,23 +35,30 @@ def main():
             from control.vision import Vision
             from control.motors import MotorPair
             from control.tasks import TaskRunner
+            from control.task_pid import initialize_task_pid
             model = ResidentModel(paths["model_package"])
             planner = Planner(ROOT, config=config)
             vision = Vision(ROOT, {**config["vision"], "video_dir": str(paths["video_dir"])})
 
             def execute(task, task_id):
                 result = {"status": "failed"}
+                pid_report = {"status": "not_started"}
                 try:
-                    print(f"[task {task_id}] camera starting", flush=True)
-                    vision.start(task_id)
-                    print(f"[task {task_id}] camera ready; executing", flush=True)
                     with MotorPair(config["hardware"]) as motors:
+                        print(f"[task {task_id}] PID RAM initializing", flush=True)
+                        initialize_task_pid(motors, config["hardware"], pid_report)
+                        print(f"[task {task_id}] camera starting", flush=True)
+                        vision.start(task_id)
+                        print(f"[task {task_id}] camera ready; executing", flush=True)
                         result = TaskRunner(planner, config, motors, vision).run(task)
                 except KeyboardInterrupt:
                     result.update(status="failed", reason="task_interrupted")
                 except Exception as exc:
                     result.update(status="failed", reason=str(exc), error_type=type(exc).__name__)
+                    if getattr(exc, "details", None):
+                        result["details"] = exc.details
                 finally:
+                    result["pid_initialization"] = pid_report
                     result["video"] = vision.close()
                 if result["video"]["status"] == "failed" and result["status"] == "completed":
                     result.update(status="failed", reason="video_recording_failed")

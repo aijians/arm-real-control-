@@ -12,6 +12,12 @@ bash run_pid_tuner.sh --axis both --real --pause-sal --host 0.0.0.0 --port 8765
 
 `--axis upper` / `--axis lower` 保留单轴模式；`--device`/`--motor-id`覆盖仅允许在明确指定单轴时使用。双轴按robot.json两路设备及ID连接：大臂ttyS1/ID1，小臂ttyS4/ID2。调参台仍使用A6，不支持负角命令，会在双轴下发前整体拒绝；主程序A4负角支持不受影响。
 
+## 每次任务启动前写入 PID RAM（2026-11-12）
+
+`hardware.task_start_pid.enabled=true`：每份TXT成功解析后、相机及运动任务开始前，在主任务锁和两轴独占串口内先停止并确认双轴停稳，再通过0x42依次写角度/速度环。大臂角度50/10/0、速度750/35/0；小臂角度65/10/0、速度600/35/0（均Kp/Ki/Kd）。同一常驻程序接收下一份任务时会重新写入，阶段重试和往返中的每段运动不重复写。空闲启动或没有有效任务时不打开串口、不写PID。
+
+每条写入要求正确电机ID、0x42、参数ID与成功状态应答，超时/拒绝/异常立即中止任务并尝试双轴停止，保留部分写入记录，不自动回写无法确认的旧RAM值。四条全部成功才启动相机和TaskRunner；不保存ROM、不改电流环/输出限制、不使能或改变零点。`result.json.pid_initialization`记录请求值、逐条报文/应答与停止确认。`acknowledged`只表示写入应答，不冒充运行RAM独立读回或已解决全部欠角。现有0x14整组设置不能用于判定这次RAM写入是否生效。
+
 ## Free / Push 多圈绝对位置定时基线（2026-11-10）
 
 当前 `hardware.free_timed_motion.enabled=true`，Free、Push 及 push_correction 共用该配置和执行器。Free 包括自由进场及通过 Planner.free 生成的返回路线；上述阶段均沿原关节折线细分，每轴相邻模型目标最多 `max_step_deg=0.2°`，每个后继点间隔 `period_s=0.05` 秒。保留原路径顶点、拐点及最终目标，重新生成时间；没有额外的 2°/秒路段速度限制。P0 只核对起点，之后每组向两轴各发送一条 A4 多圈绝对位置命令，驱动速度字段：Push（含 push_correction）大臂为 `push_upper_speed_deg_s=60`，小臂及 Free 两轴使用 `speed_deg_s=60`（电机轴 °/s）。
