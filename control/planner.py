@@ -387,6 +387,107 @@ class Planner:
     def approach(self, q_start, color, direction, sliders):
         return self._contact_phase("approach", q_start, color, direction, sliders)
 
+    def _observation_geometry(self, color, sliders, x_limits):
+        positions = self._positions(sliders)
+        if color not in positions:
+            raise PlanError("unknown_slider_color")
+        try:
+            lo, hi = [float(v) for v in x_limits]
+            y = float(self.config["sliders"][color]["y_mm"])
+            entry_y = float(self.routes["entry_y_mm"])
+            if not all(math.isfinite(v) for v in (lo, hi, y, entry_y)) or lo >= hi or entry_y >= y - 2.:
+                raise ValueError()
+        except (TypeError, ValueError, KeyError):
+            raise PlanError("invalid_observation_retreat_geometry") from None
+        return positions, (lo, hi), y, entry_y
+
+    def observation_pose(self, q, color, direction, sliders, x_limits):
+        """Require a measured pose outside the rail before trusting a frame."""
+        q = self._q(q)
+        positions, bounds, y, entry_y = self._observation_geometry(color, sliders, x_limits)
+        self._clear(q, {c: x for c, x in positions.items() if c != color})
+        margins = self.scene.slider_sweep_margins(q, y, bounds)
+        if any(value < -1e-9 for value in margins.values()):
+            raise PlanError("observation_pose_overlaps_slider_rail")
+        centre = list(self.arm.slider_center(q, direction))
+        if centre[1] > entry_y + self.settings["contact_position_tolerance_mm"]:
+            raise PlanError("observation_pose_not_clear_of_rail")
+        projected = self.scene.observation_image_margin(q, y, bounds)
+        if projected < -1e-9:
+            raise PlanError("observation_pose_occludes_slider_rail")
+        return {"tool_point_mm": centre, "entry_y_mm": entry_y,
+                "rail_y_mm": y, "rail_clearance_mm": y - centre[1],
+                "minimum_sweep_margin_mm": min(margins.values(), default=0.),
+                "minimum_projected_margin_mm": projected}
+
+    def _checked_observation_edges(self, path, color, direction, positions, bounds, y):
+        # No new image is needed to escape: conservatively cover every
+        # possible target-slider position within the task's fixed rail limits.
+        other = {c: x for c, x in positions.items() if c != color}
+        initial = self.scene.slider_sweep_margins(path[0], y, bounds)
+        for (body, part, primitive), margin in initial.items():
+            if margin < -1e-9 and (part != "forearm" or primitive != "stem"):
+                raise PlanError("observation_retreat_initial_nonstem_collision:" + body)
+        previous = dict(initial)
+        start = self.arm.slider_center(path[0], direction)
+        previous_y = start[1]
+        previous_bodies = {item["name"]: polygon for item, polygon in self.scene.transformed_bodies(path[0])}
+        overlapping_bodies = {key[0] for key, value in initial.items() if value < -1e-9}
+        sign = 1 if direction == "+x" else -1
+        for a, b in zip([path[0]] + path[:-1], path):
+            count = max(1, math.ceil(max(abs(v-u) for u, v in zip(a, b)) /
+                                    math.radians(self.settings["collision_step_deg"])))
+            for i in range(count + 1):
+                q = [u + (v-u)*i/count for u, v in zip(a, b)]
+                self._clear(q, other)
+                centre = self.arm.slider_center(q, direction)
+                if sign * (centre[0] - start[0]) > self.scene.contact_tolerance + 1e-9 or centre[1] > previous_y + 1e-9:
+                    raise PlanError("observation_retreat_must_move_outward")
+                bodies = {item["name"]: polygon for item, polygon in self.scene.transformed_bodies(q)}
+                for body in overlapping_bodies:
+                    change = bodies[body] - previous_bodies[body]
+                    if any(sign * value > 1e-9 for value in change[:, 0]) or any(value > 1e-9 for value in change[:, 1]):
+                        raise PlanError("observation_retreat_body_moves_toward_slider:" + body)
+                current = self.scene.slider_sweep_margins(q, y, bounds)
+                for key, margin in current.items():
+                    if previous[key] >= -1e-9:
+                        if margin < -1e-9:
+                            raise PlanError("observation_retreat_new_slider_collision:" + key[0])
+                    elif margin < previous[key] - 1e-9:
+                        raise PlanError("observation_retreat_deepens_contact:" + key[0])
+                previous, previous_y, previous_bodies = current, centre[1], bodies
+        if any(value < -1e-9 for value in previous.values()):
+            raise PlanError("observation_retreat_did_not_clear_slider")
+        return [{"body": key[0], "primitive": key[2], "initial_margin_mm": value}
+                for key, value in initial.items() if value < -1e-9]
+
+    def observation_retreat(self, q_start, color, direction, sliders, x_limits, *, all_slider_limits=None):
+        q = self._q(q_start)
+        positions, bounds, y, entry_y = self._observation_geometry(color, sliders, x_limits)
+        start = list(self.arm.slider_center(q, direction))
+        distance = max(0., start[1] - entry_y)
+        # Open the contact side as well as moving outside the slot; a pure
+        # perpendicular rotation can sweep a corner toward the hidden stem.
+        sign = 1 if direction == "+x" else -1
+        end = [start[0] - sign * .5 * distance, min(start[1], entry_y)]
+        path, distances = self._line(q, end, direction, contact=False)
+        overlaps = self._checked_observation_edges(path, color, direction, positions, bounds, y)
+        phase = self._phase("free", path, distances, self.settings["contact_speed_mm_s"],
+            _collision_context=({c: x for c, x in positions.items() if c != color}, None),
+            direction=direction, route="observation_retreat", color=color,
+            collision_checked=True, target_rail_bounds_x_mm=list(bounds),
+            initial_stem_overlaps=overlaps, reference_start_mm=start, reference_target_mm=end)
+        # Certify the final motor-command chords too, after resampling.
+        self._checked_observation_edges([p["q_rad"] for p in phase["points"]],
+                                        color, direction, positions, bounds, y)
+        self.observation_pose(phase["points"][-1]["q_rad"], color, direction, positions, bounds)
+        if all_slider_limits is not None:
+            if set(all_slider_limits) != set(positions):
+                raise PlanError("invalid_observation_slider_limits")
+            for other_color, limits in all_slider_limits.items():
+                self.observation_pose(phase["points"][-1]["q_rad"], other_color, direction, positions, limits)
+        return phase
+
     def withdraw(self, q_start, color, direction, sliders, *, from_reference=False,
                  reference_extension_mm=0.):
         if not from_reference:
@@ -470,6 +571,34 @@ class Planner:
             reference_start_mm=start, reference_target_mm=end,
             retry_fixed_endpoint=True, collision_checked=name == "withdraw",
             cartesian_compensation=self._cartesian_compensation(start, end, direction))
+
+    def reenter_correction(self, phase, q_start, sliders):
+        """Resume the same bounded correction endpoint after taking a clear image."""
+        if phase.get("phase") != "push_correction":
+            raise PlanError("unsupported_contact_retry")
+        q, positions = self._q(q_start), self._positions(sliders)
+        direction, color = phase["direction"], phase["color"]
+        centre = list(self.arm.slider_center(q, direction))
+        target = self._target(color, positions)
+        sign = 1 if direction == "+x" else -1
+        tolerance = self.settings["contact_position_tolerance_mm"]
+        gap = sign * (target[0] - centre[0])
+        if abs(centre[1] - target[1]) > tolerance or gap < -tolerance or gap > self.offsets[direction] + tolerance:
+            raise PlanError("correction_reentry_contact_error")
+        if self.arm.world_normal(q, direction)[0] * sign <= 0:
+            raise PlanError("contact_face_points_away_from_slider")
+        end_q = list(phase["points"][-1]["q_rad"])
+        end = list(self.arm.slider_center(end_q, direction))
+        if sign * (end[0] - centre[0]) < 0:
+            raise PlanError("correction_reentry_would_reverse")
+        path, distances = self._line(q, end, direction, q_goal=end_q)
+        return self._phase("push_correction", path, distances, self.correction_settings["speed_mm_s"],
+            color=color, direction=direction, task_target_x_mm=phase["task_target_x_mm"],
+            feasible_x_limits_mm=phase["feasible_x_limits_mm"],
+            extension_mm=phase["extension_mm"], reference_start_mm=centre, reference_target_mm=end,
+            correction_reference_start_mm=phase.get("correction_reference_start_mm", phase["reference_start_mm"]),
+            entry_mode="continuous_from_precontact", retry_fixed_endpoint=True, collision_checked=False,
+            cartesian_compensation=self._cartesian_compensation(centre, end, direction))
 
     @staticmethod
     def _push_target(target_x_mm, limits_x_mm):

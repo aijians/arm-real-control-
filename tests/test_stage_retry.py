@@ -19,7 +19,7 @@ class StageRetryTests(unittest.TestCase):
         original = runner.motors.move
         free_calls = []
         def move(phase, **kwargs):
-            if phase["phase"] == "free":
+            if phase["phase"] == "free" and phase.get("route") != "observation_retreat":
                 free_calls.append(phase)
                 if len(free_calls) < 4:
                     runner.motors.q = [-10. + len(free_calls), 0.]
@@ -42,7 +42,8 @@ class StageRetryTests(unittest.TestCase):
         original = runner.motors.move
         sequence = []
         def move(phase, **kwargs):
-            sequence.append(phase["phase"])
+            if phase.get("route") != "observation_retreat":
+                sequence.append(phase["phase"])
             if phase["phase"] == "push" and sequence.count("push") == 2:
                 # Reproduce the reported contact guard: retry is only valid
                 # after a new Free, rather than a repeated direct push.
@@ -65,8 +66,9 @@ class StageRetryTests(unittest.TestCase):
         original = runner.motors.move
         sequence = []
         def move(phase, **kwargs):
-            sequence.append(phase["phase"])
-            if sequence == ["free", "push", "free"]:
+            if phase.get("route") != "observation_retreat":
+                sequence.append(phase["phase"])
+            if phase.get("route") != "observation_retreat" and sequence == ["free", "push", "free"]:
                 raise HardwareError("motion_goal_settle_timeout")
             return original(phase, **kwargs)
         runner.motors.move = move
@@ -98,21 +100,18 @@ class StageRetryTests(unittest.TestCase):
         runner._run_leg("蓝", 0.)
         self.assertEqual(runner.motors.move.call_count, 1)
 
-    def test_failed_withdraw_does_not_repeat_push(self):
+    def test_failed_observation_retreat_does_not_repeat_a_visually_finished_push(self):
         runner = self.runner([0.])
-        # Undo the legacy fixture's withdrawal stub.
-        del runner._withdraw
-        runner.planner.withdraw = Mock(return_value={"phase": "withdraw"})
         original = runner.motors.move
         count = 0
         def move(phase, **kwargs):
             nonlocal count
-            if phase["phase"] == "withdraw":
+            if phase.get("route") == "observation_retreat":
                 count += 1
                 if count < 4:
                     raise HardwareError("motion_goal_hold_timeout")
             result = original(phase, **kwargs)
-            if phase["phase"] == "withdraw":
+            if phase.get("route") == "observation_retreat":
                 runner.motors.stopped = True
             return result
         runner.motors.move = move
@@ -127,7 +126,7 @@ class StageRetryTests(unittest.TestCase):
         frees = 0
         def move(phase, **kwargs):
             nonlocal frees
-            if phase["phase"] == "free":
+            if phase["phase"] == "free" and phase.get("route") != "observation_retreat":
                 frees += 1
                 if 2 <= frees < 5:
                     raise HardwareError("motion_goal_settle_timeout")

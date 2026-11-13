@@ -225,6 +225,9 @@ class TimedFreeTests(unittest.TestCase):
         runner.motors.halt.return_value = {"stopped_confirmed": True}
         runner._snapshot = Mock(return_value={"q_rad": [0, 0], "sliders_x_mm": {"蓝": 0}})
         runner._withdraw = Mock()
+        # This test isolates stage retry counting; observation retreat has
+        # its own geometry and task fixtures in test_observation_retreat.
+        runner._clear_for_observation = Mock()
         runner.planner = Mock()
         runner._move = Mock(side_effect=m.HardwareError("motion_goal_settle_timeout",
                                                        {"controller": "free_timed"}))

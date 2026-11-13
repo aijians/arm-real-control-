@@ -21,6 +21,7 @@ class Vision:
         self.x = x
         self.reads = []
         self.motors = None
+        self.occluded = False
 
     def check_health(self):
         pass
@@ -28,6 +29,8 @@ class Vision:
     def read(self, after_monotonic_s=None):
         if not self.motors.stopped:
             raise AssertionError("pin detection attempted during motion")
+        if self.occluded:
+            raise AssertionError("pin detection attempted before tool retreat")
         stamp = max(time.monotonic(), (after_monotonic_s or 0.) + 1e-6)
         self.reads.append({"after": after_monotonic_s, "stamp": stamp,
                            "last_stop": self.motors.last_stop})
@@ -62,11 +65,14 @@ class Motors:
         self.moves.append(copy.deepcopy(phase))
         self.stopped = False
         if phase["phase"] in ("push", "push_correction"):
+            self.vision.occluded = True
             outcome = self.outcomes.pop(0)
             self.vision.x = outcome[0] if isinstance(outcome, tuple) else outcome
             self.q[0] = phase["reference_target_mm"][0]
             if isinstance(outcome, tuple):
                 raise RuntimeError(outcome[1])
+        if phase.get("route") == "observation_retreat":
+            self.vision.occluded = False
         return {"status": "completed", "phase": phase["phase"]}
 
 
@@ -79,6 +85,15 @@ class FakePlanner:
 
     def free(self, *args, **kwargs):
         return {"phase": "free"}
+
+    def observation_retreat(self, q, color, direction, sliders, limits, **kwargs):
+        return {"phase": "free", "route": "observation_retreat",
+                "points": [{"q_rad": q}] * (2 if self.vision.occluded else 1)}
+
+    def observation_pose(self, *args):
+        if self.vision.occluded:
+            raise PlanError("observation_pose_not_clear_of_rail")
+        return {"rail_clearance_mm": 20.}
 
     def approach(self, *args):
         return {"phase": "approach"}
@@ -99,6 +114,9 @@ class FakePlanner:
     def retry_contact(self, phase, q, sliders):
         return copy.deepcopy(phase)
 
+    def reenter_correction(self, phase, q, sliders):
+        return copy.deepcopy(phase)
+
 
 class BoundedPushTests(unittest.TestCase):
     def runner(self, outcomes, start=-10., **settings):
@@ -108,6 +126,7 @@ class BoundedPushTests(unittest.TestCase):
         vision = Vision(start)
         motors = Motors(vision, outcomes)
         planner = FakePlanner()
+        planner.vision = vision
         runner = TaskRunner(planner, config, motors, vision)
         runner._withdraw = lambda *_: None
         runner.legs({"intent": "push_to_end", "color": "蓝"},

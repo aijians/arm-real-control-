@@ -44,6 +44,17 @@ def _box(center, size):
     return center+np.array([[-1,-1],[1,-1],[1,1],[-1,1]])*half
 
 
+def _separation(first, second):
+    """Signed separating-axis margin; negative means convex penetration."""
+    margins = []
+    for polygon in (first, second):
+        edges = np.roll(polygon, -1, axis=0) - polygon
+        normals = np.column_stack((-edges[:, 1], edges[:, 0]))
+        normals /= np.linalg.norm(normals, axis=1)[:, None]
+        a, b = first @ normals.T, second @ normals.T
+        margins.extend(np.maximum(b.min(0) - a.max(0), a.min(0) - b.max(0)))
+    return float(max(margins))
+
 class SimpleScene:
     def __init__(self, config):
         self.config=config
@@ -104,3 +115,37 @@ class SimpleScene:
 
     def path_free(self,q_path,sliders=None,contact=None):
         return all(self.check(q,sliders,contact) is None for q in q_path)
+
+    def slider_sweep_margins(self, q, y_mm, x_limits):
+        """Conservative boxes cover every target position along its rail.
+
+        This supplies geometry only. The planner permits only decreasing
+        pre-existing forearm/stem overlap while certifying an outward escape.
+        Normal collision checks and contact exemptions remain unchanged.
+        """
+        lo, hi = x_limits
+        result = {}
+        for item, polygon in self.transformed_bodies(q):
+            for shape in self.slider_shapes:
+                if item['z_mm'][1] <= shape['z_mm'][0] or shape['z_mm'][1] <= item['z_mm'][0]:
+                    continue
+                half = ([shape['radius_mm']] * 2 if shape['shape'] == 'circle'
+                        else np.asarray(shape['size_xy_mm'], float) / 2)
+                sweep = _box([(lo + hi) / 2, y_mm],
+                             [hi - lo + 2 * half[0], 2 * half[1]])
+                result[(item['name'], item['part'], shape['name'])] = _separation(polygon, sweep)
+        return result
+
+    def observation_image_margin(self, q, y_mm, x_limits):
+        # Camera visibility needs XY clearance even for arm bodies whose Z
+        # range cannot physically touch the slider. Enclose all its visible
+        # primitives over the full rail interval, rather than its last X.
+        half_x = half_y = 0.
+        for shape in self.slider_shapes:
+            half = ([shape['radius_mm']] * 2 if shape['shape'] == 'circle'
+                    else np.asarray(shape['size_xy_mm'], float) / 2)
+            half_x, half_y = max(half_x, half[0]), max(half_y, half[1])
+        lo, hi = x_limits
+        footprint = _box([(lo + hi) / 2, y_mm],
+                         [hi - lo + 2 * half_x, 2 * half_y])
+        return min((_separation(polygon, footprint) for _, polygon in self.transformed_bodies(q)), default=0.)
