@@ -133,7 +133,7 @@
       "enabled": true,
       "upper": {
         "angle": {"kp": 50, "ki": 15, "kd": 0},
-        "speed": {"kp": 600, "ki": 40, "kd": 0}
+        "speed": {"kp": 600, "ki": 42, "kd": 0}
       },
       "lower": {
         "angle": {"kp": 50, "ki": 0, "kd": 0},
