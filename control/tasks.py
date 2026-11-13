@@ -352,6 +352,59 @@ class TaskRunner:
             record["reason"] = str(exc)
         return record, None
 
+    def _initial_environment(self, result):
+        """Confirm a fresh, stationary rail before freezing any motion goal."""
+        required, max_spread = 3, 1.0
+        limit = max(required, int(self.config["retry_limit"]) + 1)
+        confirmation = result["initial_limits_confirmation"] = {
+            "status": "unconfirmed", "required_samples": required,
+            "max_spread_mm": max_spread, "max_observations": limit, "observations": []}
+        accepted = []
+        for number in range(limit):
+            try:
+                stop = self.motors.halt()
+                if not stop.get("stopped_confirmed"):
+                    raise TaskError("initial_stop_not_confirmed")
+                observed = self._snapshot()
+                result["initial_state"] = observed
+                limits = observed.get("slider_limits_x_mm")
+                confirmation["observations"].append({
+                    "attempt": number, "stamp_monotonic_s": observed.get("stamp_monotonic_s"),
+                    "slider_limits_x_mm": limits,
+                    "rail_observation": observed.get("rail_observation", {})})
+                if limits is None:
+                    diagnostic = observed.get("rail_observation", {})
+                    print("[vision] rail rejected: %s; span_mm=%s; outside_by_mm=%s" % (
+                        diagnostic.get("reason", "unknown"), diagnostic.get("span_mm"),
+                        diagnostic.get("outside_by_mm")), flush=True)
+                    raise TaskError("slider_limits_unavailable", {
+                        "rail_observation": diagnostic})
+                # Validate both colors before using their numbers for stability.
+                TargetResolver({"sliders": self.config["sliders"],
+                    "feedback": {"slider_position_tolerance_mm": self.tolerance}}, limits)
+                accepted.append(observed)
+                spread = max(max(s["slider_limits_x_mm"][c][i] for s in accepted)
+                             - min(s["slider_limits_x_mm"][c][i] for s in accepted)
+                             for c in self.config["sliders"] for i in (0, 1))
+                if spread > max_spread:
+                    raise TaskError("slider_limits_unstable", {"spread_mm": spread,
+                                                               "max_spread_mm": max_spread})
+                if len(accepted) >= required:
+                    confirmation.update(status="confirmed", spread_mm=spread)
+                    return observed
+                print("[vision] rail confirmation %d/%d" % (len(accepted), required), flush=True)
+            except Exception as exc:
+                accepted = []
+                result["environment_recovery"].append({"attempt": number, "reason": str(exc),
+                                                       "details": getattr(exc, "details", {})})
+                if str(exc) in self._NO_RETRY or str(exc) == "initial_stop_not_confirmed":
+                    raise
+                if number == limit - 1:
+                    raise
+                print("[vision] retry initial environment %d: %s" % (number + 1, exc), flush=True)
+        raise TaskError("slider_limits_unstable", {"confirmed_samples": len(accepted),
+                                                   "required_samples": required})
+
     def run(self, task):
         task = normalize_task(task)
         result = {"mode": "hardware_execution", "status": "failed", "task": task,
@@ -359,18 +412,7 @@ class TaskRunner:
                   "planned_round_trips": task.get("round_trips", 0)}
         try:
             result["environment_recovery"] = []
-            initial = None
-            for number in range(int(self.config["retry_limit"]) + 1):
-                try:
-                    stop = self.motors.halt()
-                    if not stop.get("stopped_confirmed"):
-                        raise TaskError("initial_stop_not_confirmed")
-                    initial = self._snapshot()
-                    break
-                except Exception as exc:
-                    result["environment_recovery"].append({"attempt": number, "reason": str(exc)})
-            if initial is None:
-                raise TaskError("fresh_stopped_environment_unavailable")
+            initial = self._initial_environment(result)
             # Preserve the observation even if task target validation fails.
             result["initial_state"] = initial
             # Keep the measured limits and goals fixed for this task; later

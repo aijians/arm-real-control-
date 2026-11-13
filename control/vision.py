@@ -68,7 +68,7 @@ class Vision:
         self.min_rail_span_mm = _finite(rail_geom.get("min_rail_span_mm", 72.0), "min_rail_span_mm")
         self.max_rail_span_mm = _finite(rail_geom.get("max_rail_span_mm", 90.0), "max_rail_span_mm")
         self.limit_position_tolerance_mm = _finite(
-            rail_geom.get("limit_position_tolerance_mm", 1.5), "limit_position_tolerance_mm"
+            rail_geom.get("limit_position_tolerance_mm", 2.5), "limit_position_tolerance_mm"
         )
         if (self.center_inset_mm <= 0 or self.occupied_end_clearance_mm <= 0
                 or self.min_rail_span_mm <= 0 or self.min_rail_span_mm >= self.max_rail_span_mm
@@ -127,7 +127,7 @@ class Vision:
         """Saved-image analysis grants no live-observation freshness."""
         return self._detect(path, detect_sliders, "offline_image")
 
-    def _compute_slider_limits(self, world, positions):
+    def _compute_slider_limits(self, world, positions, report=None):
         """由实测导轨左右端点计算按颜色区分的动态行程，并校验导轨总跨度及与两个滑杆当前位置的一致性。
 
         任一校验不通过时返回 None（拒绝将截断/偏斜端点交给下游生成错误 target）：
@@ -136,6 +136,9 @@ class Vision:
         3. 蓝、橙两滑杆动态行程满足 lo < hi；
         4. 当前帧观测到的蓝杆与橙杆位置均落在各自动态行程 [lo - tol, hi + tol] 内（防止右端点落在橙杆附近截断导轨）。
         """
+        report = {} if report is None else report
+        report.update(status="rejected", reason="rail_endpoints_missing",
+                      position_tolerance_mm=self.limit_position_tolerance_mm)
         rail_ep = world.get("rail_endpoints")
         if not isinstance(rail_ep, dict) or not rail_ep.get("left") or not rail_ep.get("right"):
             return None
@@ -143,12 +146,16 @@ class Vision:
             xl_glob = _finite(rail_ep["left"]["world_xyz_mm"][0], "rail_left_x")
             xr_glob = _finite(rail_ep["right"]["world_xyz_mm"][0], "rail_right_x")
         except (KeyError, IndexError, TypeError, VisionError):
+            report["reason"] = "rail_endpoint_coordinates_invalid"
             return None
 
         xl_mod = xl_glob - self.shoulder[0]
         xr_mod = xr_glob - self.shoulder[0]
         span_mm = xr_mod - xl_mod
+        report.update(endpoints_x_mm=[xl_mod, xr_mod], span_mm=span_mm,
+                      allowed_span_mm=[self.min_rail_span_mm, self.max_rail_span_mm])
         if not (self.min_rail_span_mm <= span_mm <= self.max_rail_span_mm):
+            report["reason"] = "rail_span_out_of_range"
             return None
 
         inset = self.center_inset_mm
@@ -158,18 +165,26 @@ class Vision:
         orange_lo = xl_mod + inset + occupied
         orange_hi = xr_mod - inset
         if blue_lo >= blue_hi or orange_lo >= orange_hi:
+            report["reason"] = "rail_too_short_for_center_insets"
             return None
 
         tol = self.limit_position_tolerance_mm
         x_blue = positions["蓝"]
         x_orange = positions["橙"]
         if x_blue >= x_orange:
+            report["reason"] = "slider_order_invalid"
             return None
+        report.update(candidate_limits_x_mm={"蓝": [blue_lo, blue_hi], "橙": [orange_lo, orange_hi]},
+                      outside_by_mm={"蓝": max(blue_lo-x_blue, x_blue-blue_hi, 0.),
+                                     "橙": max(orange_lo-x_orange, x_orange-orange_hi, 0.)})
         if not (blue_lo - tol <= x_blue <= blue_hi + tol):
+            report.update(reason="slider_position_outside_limits", color="蓝")
             return None
         if not (orange_lo - tol <= x_orange <= orange_hi + tol):
+            report.update(reason="slider_position_outside_limits", color="橙")
             return None
 
+        report.update(status="accepted", reason="ok")
         return {
             "蓝": [blue_lo, blue_hi],
             "橙": [orange_lo, orange_hi],
@@ -212,11 +227,13 @@ class Vision:
         if positions["蓝"] >= positions["橙"]:
             raise VisionError("slider_order_invalid: 蓝 must be left of 橙")
 
-        slider_limits_x_mm = self._compute_slider_limits(world, positions)
+        rail_observation = {"endpoints_px": pixels.get("rail_endpoints_px")}
+        slider_limits_x_mm = self._compute_slider_limits(world, positions, rail_observation)
 
         return {
             "sliders_x_mm": positions,
             "slider_limits_x_mm": slider_limits_x_mm,
+            "rail_observation": rail_observation,
             "stamp_monotonic_s": None,
             "approximate": bool(world.get("is_approximate", True)),
         }
@@ -237,5 +254,7 @@ class Vision:
         received = frame["received_monotonic_s"]
         if time.monotonic() - received > self.max_age:
             raise VisionError("camera_frame_stale_after_detection")
+        result["rail_observation"].update(frame_sequence=frame["sequence"],
+            received_monotonic_s=received, pipeline_pts_ns=frame.get("pipeline_pts_ns"))
         result.update(stamp_monotonic_s=received)
         return result

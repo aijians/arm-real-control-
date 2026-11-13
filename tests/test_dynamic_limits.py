@@ -84,6 +84,7 @@ class DynamicTaskLimitsTests(unittest.TestCase):
                 "q_rad": [3., .5]}
         runner._snapshot = lambda: copy.deepcopy(live)
         runner._withdraw = lambda *_: None
+        runner._clear_for_observation = lambda *_: None
         runner._move = lambda *_: live["q_rad"]
         runner.motors.read_state.return_value = {"q_rad": live["q_rad"]}
         runner._verify = lambda *_: {"passed": True, "last_observation": copy.deepcopy(live)}
@@ -108,6 +109,8 @@ class PlannerObservedLimitsTests(unittest.TestCase):
         planner = Planner.__new__(Planner)
         planner.config = configuration()
         planner.settings = {"contact_position_tolerance_mm": 1., "push_speed_mm_s": 5., "linear_step_mm": 1.}
+        planner.offsets = {"+x": 10., "-x": 2.}
+        planner._cartesian_compensation = Mock(return_value={})
         planner._q = lambda q: q
         planner._positions = lambda p: p
         planner.arm = Mock()
