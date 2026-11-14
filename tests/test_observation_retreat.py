@@ -34,10 +34,10 @@ class ObservationTaskTests(unittest.TestCase):
 
     def test_measured_clearance_failure_blocks_acceptance(self):
         runner = self.runner([0.])
-        runner.planner.observation_pose = Mock(side_effect=PlanError('observation_pose_not_clear_of_rail'))
+        runner.planner.observation_pose = Mock(side_effect=PlanError('observation_pose_occludes_slider_rail'))
         record, _ = runner._run_leg('蓝', 0.)
         self.assertEqual(record['status'], 'failed')
-        self.assertEqual(record['reason'], 'observation_pose_not_clear_of_rail')
+        self.assertEqual(record['reason'], 'observation_pose_occludes_slider_rail')
         self.assertEqual(len(runner.vision.reads), 1)
         self.assertEqual(sum(p['phase']=='push' for p in runner.motors.moves), 1)
 
@@ -123,6 +123,31 @@ class ObservationGeometryTests(unittest.TestCase):
             return original(pose)+[(cover,_box([-10.,155.],[5.,5.]))]
         with patch.object(self.p.scene,'transformed_bodies',side_effect=bodies):
             with self.assertRaisesRegex(PlanError,'occludes_slider_rail'):
+                self.p.observation_pose(q,'蓝','+x',self.sliders,self.bounds)
+
+    def test_recorded_clear_poses_above_old_y_threshold_can_be_observed(self):
+        # 64c34f7e: these four stopped model poses had positive body/image
+        # margins, but the old tool-point Y <= 136 gate blocked every frame.
+        sliders={'蓝':-49.570206114541406,'橙':7.980740038857078}
+        limits={'蓝':[-50.98166426322149,-5.365647979017041],
+                '橙':[-35.48166426322149,10.134352020982959]}
+        for deg in ([162.84,41.51],[162.87,41.60],[162.94,41.61],[162.95,41.56]):
+            q=list(map(math.radians,deg))
+            for color,bounds in limits.items():
+                with self.subTest(deg=deg,color=color):
+                    observed=self.p.observation_pose(q,color,'+x',sliders,bounds)
+                    self.assertGreater(observed['tool_point_mm'][1],136.)
+                    self.assertGreater(observed['minimum_sweep_margin_mm'],0.)
+                    self.assertGreater(observed['minimum_projected_margin_mm'],0.)
+
+    def test_pose_above_old_y_threshold_still_rejects_image_occlusion(self):
+        q=list(map(math.radians,[162.84,41.51]))
+        cover={'name':'high_cover','part':'forearm','z_mm':[100.,110.]}
+        original=self.p.scene.transformed_bodies
+        def bodies(pose):
+            return original(pose)+[(cover,_box([-10.,155.],[5.,5.]))]
+        with patch.object(self.p.scene,'transformed_bodies',side_effect=bodies):
+            with self.assertRaisesRegex(PlanError,'observation_pose_occludes_slider_rail'):
                 self.p.observation_pose(q,'蓝','+x',self.sliders,self.bounds)
 
     def test_other_slider_remains_protected(self):

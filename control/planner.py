@@ -402,7 +402,7 @@ class Planner:
         return positions, (lo, hi), y, entry_y
 
     def observation_pose(self, q, color, direction, sliders, x_limits):
-        """Require a measured pose outside the rail before trusting a frame."""
+        """Require full-rail body and projected clearance before a frame."""
         q = self._q(q)
         positions, bounds, y, entry_y = self._observation_geometry(color, sliders, x_limits)
         self._clear(q, {c: x for c, x in positions.items() if c != color})
@@ -410,8 +410,8 @@ class Planner:
         if any(value < -1e-9 for value in margins.values()):
             raise PlanError("observation_pose_overlaps_slider_rail")
         centre = list(self.arm.slider_center(q, direction))
-        if centre[1] > entry_y + self.settings["contact_position_tolerance_mm"]:
-            raise PlanError("observation_pose_not_clear_of_rail")
+        # entry_y is a planning target. Visibility is checked with the whole
+        # arm projection, rather than an extra tool-point Y threshold.
         projected = self.scene.observation_image_margin(q, y, bounds)
         if projected < -1e-9:
             raise PlanError("observation_pose_occludes_slider_rail")
