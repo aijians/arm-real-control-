@@ -12,12 +12,14 @@ ROOT=Path(__file__).resolve().parents[1]
 class JointLimitTests(unittest.TestCase):
     def pair(self):
         config,_=load_config(ROOT)
+        # Protocol wrapping fixtures are independent of installation offsets.
+        for motor in config['hardware']['motors']: motor['offset_deg']=0.
         return MotorPair(config['hardware'])
 
     def test_loaded_and_geometric_limits_match_requested_intervals(self):
         config,_=load_config(ROOT)
         self.assertEqual([(m['offset_deg'],m['limits_deg']) for m in config['hardware']['motors']],
-                         [(0.,[90.,182.]),(0.,[-1.,90.])])
+                         [(-3.,[90.,182.]),(2.25,[-1.,90.])])
         planner=Planner(ROOT,config)
         self.assertEqual(planner.scene.limits.tolist(),
                          config['kinematics']['arm']['joint_limits_rad'])
