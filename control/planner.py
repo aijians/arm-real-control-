@@ -353,7 +353,7 @@ class Planner:
             distances.extend(steps)
         return path, distances
 
-    def free(self, q_start, q_goal, sliders, direction="+x"):
+    def free(self, q_start, q_goal, sliders, direction="+x", *, all_slider_limits=None):
         started = time.monotonic()
         start, goal, positions = self._q(q_start), self._q(q_goal), self._positions(sliders)
         if direction not in ("+x", "-x"):
@@ -385,11 +385,17 @@ class Planner:
         for route_name, targets in candidates:
             try:
                 path, distances = self._free_route(start, targets, positions, direction)
-                return self._phase("free", path, distances, self.settings["free_speed_mm_s"],
+                phase = self._phase("free", path, distances, self.settings["free_speed_mm_s"],
                     _collision_context=(positions, None),
                     direction=direction, route=route_name, collision_checked=True,
                     slider_positions_x_mm=positions, planning_elapsed_s=time.monotonic()-started,
                     cartesian_waypoints_mm=[list(self.arm.slider_center(q, direction)) for q in [start] + targets])
+                if all_slider_limits is not None:
+                    self._checked_return_edges([p["q_rad"] for p in phase["points"]],
+                                               direction, positions, all_slider_limits)
+                    phase["slider_rail_bounds_x_mm"] = {c: list(bounds)
+                        for c, bounds in all_slider_limits.items()}
+                return phase
             except PlanError as exc:
                 failures.append(str(exc))
         raise PlanError("free_path_not_found:" + " | ".join(failures))
@@ -449,8 +455,8 @@ class Planner:
             raise PlanError("invalid_observation_retreat_geometry") from None
         return positions, (lo, hi), y, entry_y
 
-    def observation_pose(self, q, color, direction, sliders, x_limits):
-        """Require full-rail body and projected clearance before a frame."""
+    def observation_pose(self, q, color, direction, sliders, x_limits, *, require_visibility=True):
+        """Require full-rail body clearance, plus visibility at a camera pose."""
         q = self._q(q)
         positions, bounds, y, entry_y = self._observation_geometry(color, sliders, x_limits)
         self._clear(q, {c: x for c, x in positions.items() if c != color})
@@ -461,12 +467,26 @@ class Planner:
         # entry_y is a planning target. Visibility is checked with the whole
         # arm projection, rather than an extra tool-point Y threshold.
         projected = self.scene.observation_image_margin(q, y, bounds)
-        if projected < -1e-9:
+        if require_visibility and projected < -1e-9:
             raise PlanError("observation_pose_occludes_slider_rail")
         return {"tool_point_mm": centre, "entry_y_mm": entry_y,
                 "rail_y_mm": y, "rail_clearance_mm": y - centre[1],
                 "minimum_sweep_margin_mm": min(margins.values(), default=0.),
                 "minimum_projected_margin_mm": projected}
+
+    def _checked_return_edges(self, path, direction, positions, all_slider_limits):
+        # The pushed slider has not been re-observed yet. Certify the home
+        # route against both complete travel ranges, never an assumed goal.
+        if set(all_slider_limits) != set(positions):
+            raise PlanError("invalid_observation_slider_limits")
+        for a, b in zip([path[0]] + path[:-1], path):
+            count = max(1, math.ceil(max(abs(v-u) for u, v in zip(a, b)) /
+                                    math.radians(self.settings["collision_step_deg"])))
+            for i in range(count + 1):
+                q = [u + (v-u)*i/count for u, v in zip(a, b)]
+                for color, bounds in all_slider_limits.items():
+                    self.observation_pose(q, color, direction, positions, bounds,
+                                          require_visibility=False)
 
     def _checked_observation_edges(self, path, color, direction, positions, bounds, y):
         # Cover the full rail before/after extraction. Only pre-existing
@@ -521,7 +541,8 @@ class Planner:
         return [{"body": key[0], "primitive": key[2], "initial_margin_mm": value}
                 for key, value in initial.items() if value < -1e-9]
 
-    def observation_retreat(self, q_start, color, direction, sliders, x_limits, *, all_slider_limits=None):
+    def observation_retreat(self, q_start, color, direction, sliders, x_limits, *,
+                            all_slider_limits=None, require_visibility=True):
         q = self._q(q_start)
         positions, bounds, y, entry_y = self._observation_geometry(color, sliders, x_limits)
         start = list(self.arm.slider_center(q, direction))
@@ -541,12 +562,14 @@ class Planner:
         # Certify the final motor-command chords too, after resampling.
         self._checked_observation_edges([p["q_rad"] for p in phase["points"]],
                                         color, direction, positions, bounds, y)
-        self.observation_pose(phase["points"][-1]["q_rad"], color, direction, positions, bounds)
+        self.observation_pose(phase["points"][-1]["q_rad"], color, direction, positions, bounds,
+                              require_visibility=require_visibility)
         if all_slider_limits is not None:
             if set(all_slider_limits) != set(positions):
                 raise PlanError("invalid_observation_slider_limits")
             for other_color, limits in all_slider_limits.items():
-                self.observation_pose(phase["points"][-1]["q_rad"], other_color, direction, positions, limits)
+                self.observation_pose(phase["points"][-1]["q_rad"], other_color, direction, positions, limits,
+                                      require_visibility=require_visibility)
         return phase
 
     def withdraw(self, q_start, color, direction, sliders, *, from_reference=False,

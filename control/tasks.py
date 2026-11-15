@@ -58,6 +58,7 @@ class TaskRunner:
         self.correction_settings = push_correction_settings(config)
         self.targets = None
         self.contact = None
+        self.observation_home = None
         self.withdraw_extension_mm = 0.
         self.tool_direction = "+x"
         self.return_q_deg = self.config.get("planning", {}).get("return_q_deg", [170., 4.])
@@ -110,7 +111,9 @@ class TaskRunner:
         return {**observed, **joints}
 
     def _move(self, phase, record):
-        name = phase.get("route") if phase.get("route") == "observation_retreat" else phase.get("phase", "unknown")
+        self.observation_home = None
+        route = phase.get("route")
+        name = route if route in ("observation_retreat", "return_departure", "return_home") else phase.get("phase", "unknown")
         print("[motion] start " + name, flush=True)
         try:
             motion = self.motors.move(phase, health_check=self.vision.check_health)
@@ -280,20 +283,47 @@ class TaskRunner:
             self.contact = None
             self.withdraw_extension_mm = 0.
 
+    def _return_home(self, state, record, *, all_slider_limits=None):
+        """Use the same home target and acceptance for observation and final return."""
+        record["target_q_deg"] = list(self.return_q_deg)
+        print("[motion] return target: upper=%.2f deg, lower=%.2f deg" % tuple(self.return_q_deg), flush=True)
+        if self.return_upper_min_deg is not None:
+            record["upper_min_deg_exclusive"] = self.return_upper_min_deg
+            print("[motion] return acceptance: upper > %.2f deg; lower target=%.2f deg; still/hold required" %
+                  (self.return_upper_min_deg, self.return_q_deg[1]), flush=True)
+        state.update(self.motors.read_state())
+        options = {} if all_slider_limits is None else {"all_slider_limits": all_slider_limits}
+        phase = self.planner.free(state["q_rad"],
+            [math.radians(value) for value in self.return_q_deg],
+            state["sliders_x_mm"], direction=self.tool_direction, **options)
+        phase["free_route"] = phase.get("route")
+        phase["route"] = "return_home"
+        if self.return_upper_min_deg is not None:
+            phase["return_upper_min_deg"] = self.return_upper_min_deg
+        record["plan"] = phase
+        state["q_rad"] = self._move(phase, record)
+        record["status"] = "completed"
+
     def _clear_for_observation(self, state, record):
         if self.contact is None:
             return
         color, direction = self.contact
         state.update(self.motors.read_state())
         retreat = record.setdefault("observation_retreats", [])
-        entry = {"start_state": dict(state)}
+        entry = {"start_state": dict(state), "mode": "return_home_before_vision"}
         retreat.append(entry)
         limits = {c: self.targets.bounds(c) for c in self.config["sliders"]}
         phase = self.planner.observation_retreat(state["q_rad"], color, direction,
-            state["sliders_x_mm"], limits[color], all_slider_limits=limits)
+            state["sliders_x_mm"], limits[color], all_slider_limits=limits,
+            require_visibility=False)
+        phase["route"] = "return_departure"
         entry["plan"] = phase
         if len(phase["points"]) > 1:
             state["q_rad"] = self._move(phase, entry)
+        # This is a departure waypoint, not a stopped observation pose.
+        # Keep the drives active until home; release and inspect only there.
+        home = entry["return_home"] = {}
+        self._return_home(state, home, all_slider_limits=limits)
         stop = self.motors.halt()
         entry["stop"] = stop
         if not stop.get("stopped_confirmed"):
@@ -305,6 +335,7 @@ class TaskRunner:
         entry["status"] = "completed"
         self.contact = None
         self.withdraw_extension_mm = 0.
+        self.observation_home = home
 
     def _stopped_verification(self, color, goal, record, state):
         stop = self.motors.halt()
@@ -379,7 +410,7 @@ class TaskRunner:
                 if signed >= -under:
                     raise TaskError("slider_not_stably_at_target")
             if self.contact is None:
-                # Verification now leaves the tool in the observation lane.
+                # Verification now leaves the tool at home.
                 # Both retries and bounded corrections need a fresh entry.
                 state["q_rad"] = self.motors.read_state()["q_rad"]
                 entry = attempt["reentry_free"] = {"start_state": dict(state)}
@@ -589,6 +620,7 @@ class TaskRunner:
 
     def run(self, task):
         task = normalize_task(task)
+        self.observation_home = None
         result = {"mode": "hardware_execution", "status": "failed", "task": task,
                   "segments": [], "completed_round_trips": 0,
                   "planned_round_trips": task.get("round_trips", 0)}
@@ -613,21 +645,15 @@ class TaskRunner:
                     return result
                 if task["intent"] == "push_round_trip" and index % 2:
                     result["completed_round_trips"] += 1
-            result["return_motion"] = {"target_q_deg": list(self.return_q_deg)}
-            return_q_rad = [math.radians(value) for value in self.return_q_deg]
-            print("[motion] return target: upper=%.2f deg, lower=%.2f deg" % tuple(self.return_q_deg), flush=True)
-            if self.return_upper_min_deg is not None:
-                result["return_motion"]["upper_min_deg_exclusive"] = self.return_upper_min_deg
-                print("[motion] return acceptance: upper > %.2f deg; lower target=%.2f deg; still/hold required" %
-                      (self.return_upper_min_deg, self.return_q_deg[1]), flush=True)
-            def return_home(attempt):
-                phase = self.planner.free(state["q_rad"], return_q_rad,
-                    state["sliders_x_mm"], direction=self.tool_direction)
-                phase["route"] = "return_home"
-                if self.return_upper_min_deg is not None:
-                    phase["return_upper_min_deg"] = self.return_upper_min_deg
-                state["q_rad"] = self._move(phase, attempt)
-            self._stage("return", state, result["return_motion"], return_home)
+            if self.observation_home is not None:
+                # Nothing moved after this return: verification used fresh
+                # frames at home. Do not issue an unnecessary second return.
+                result["return_motion"] = {"target_q_deg": list(self.return_q_deg),
+                    "status": "completed", "completed_before_verification": True}
+            else:
+                result["return_motion"] = {"target_q_deg": list(self.return_q_deg)}
+                self._stage("return", state, result["return_motion"],
+                            lambda attempt: self._return_home(state, attempt))
             result["status"] = "completed"
         except KeyboardInterrupt:
             result.update(reason="task_interrupted", stop=self.motors.halt())
