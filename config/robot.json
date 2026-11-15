@@ -9,7 +9,7 @@
     "collision_step_deg": 0.25,
     "waypoint_min_step_deg": 1.2,
     "return_q_deg": [
-      170.0,
+      168.0,
       4.0
     ],
     "waypoint_min_axis_step_deg": 0.1,
