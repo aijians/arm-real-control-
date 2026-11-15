@@ -37,11 +37,22 @@ SCENES = {
         "lip_split_half_width": 6,
         "endpoint_edge_thresh": 28.0,
         "min_endpoint_span_px": 180,
+        # 杆轴测量带：导轨前挡边线以上 d1..d2 px（避开轴环/挡边，及机械臂从上方遮挡的部分）
+        "rod_band_px": (20, 70),
+        # 两杆在导轨上的先后顺序不变，相机侧前后遮挡关系也固定：蓝杆在前
+        "front_color": "blue",
+        "occlusion_gap_px": 8,
+        "min_rod_rows": 8,
+        # 杆宽模型 w(u)=a+b*u（像素，u 为杆轴像素 x）。2026-11-15 由 8ddc48b7/01f43e83/a63369c4
+        # 三段地面录像经 eval_slider_detection.py calibrate-width（位置区间上分位数+RANSAC）拟合。
+        "width_model_px": {"blue": (119.438, -0.14111), "yellow": (144.583, -0.17082)},
+        "width_tolerance_ratio": 0.2,
+        "min_visible_width_ratio": 0.5,
     },
     "real": {
         "canonical_size": (1920, 1080),
         "rotation_deg": 180,
-        "roi": (420, 140, 700, 365),
+        "roi": (420, 80, 700, 365),
         "rail_x_range": (465, 680),
         "rail_nominal": (480.0, 168.0, 0.650),
         "rail_band_px": 30,
@@ -49,6 +60,14 @@ SCENES = {
         "lip_split_half_width": 6,
         "endpoint_edge_thresh": 28.0,
         "min_endpoint_span_px": 150,
+        "rod_band_px": (40, 80),
+        "front_color": "blue",
+        "occlusion_gap_px": 8,
+        "min_rod_rows": 8,
+        # 2026-11-15 由在轨 init.mp4/pushed_to_right.mp4 拟合（同上方法）。
+        "width_model_px": {"blue": (124.743, -0.14575), "yellow": (134.459, -0.1571)},
+        "width_tolerance_ratio": 0.2,
+        "min_visible_width_ratio": 0.65,
     },
 }
 
@@ -339,6 +358,134 @@ def _compute_rod_axis_x(rod, offset_x):
     return rod["center"][0]
 
 
+def _rod_band_rows(rod, offset_xy, k, m, band, roi_width):
+    """返回测量带内每行杆轮廓 (y, 左边缘, 右边缘, 是否触及ROI左/右边界)，像素为全图坐标。
+
+    测量带按“导轨前挡边线以上 d1..d2 像素”取固定行，不随部件框高度变化，
+    因此机械臂从上方遮挡杆顶、或导轨支架遮挡杆底时，所用行区间保持一致。
+    """
+    x1, y1 = offset_xy
+    bx, by, bw, bh = rod["local_bbox"]
+    d1, d2 = band
+    rows = []
+    for yy in range(by, by + bh):
+        nz = np.flatnonzero(rod["mask"][yy])
+        if len(nz) < 4:
+            continue
+        left, right = int(nz[0]), int(nz[-1])
+        u = 0.5 * (left + right) + x1
+        dy = k * u + m - (yy + y1)
+        if d1 <= dy <= d2:
+            rows.append((float(yy + y1), float(left + x1), float(right + x1),
+                         left <= 0, right >= roi_width - 1))
+    return rows
+
+
+def _trimmed_mean(values, keep=0.5):
+    """去掉两端各 (1-keep)/2 后求均值；逐行整像素边缘经平均后得到亚像素估计。"""
+    arr = np.sort(np.asarray(values, dtype=np.float64))
+    if arr.size == 0:
+        return None
+    cut = int(arr.size * (1.0 - keep) / 2.0)
+    core = arr[cut: arr.size - cut] if arr.size - 2 * cut > 0 else arr
+    return float(core.mean())
+
+
+def _width_model(cfg, out_key, u):
+    model = (cfg.get("width_model_px") or {}).get(out_key)
+    if model is None:
+        return None
+    a, b = model
+    width = float(a + b * u)
+    return width if width > 4.0 else None
+
+
+def _measure_rod(rows, out_key, cfg, near_side_occluded=None):
+    """由测量带内逐行轮廓求杆轴像素 x，并给出可靠性判断。
+
+    - 两侧边缘都可见：各行中点的截尾均值（与原逐行中点法一致，改为固定测量带）。
+    - 前杆紧邻后杆一侧（near_side_occluded='left'/'right'）：该侧边缘被前杆遮挡，
+      改用未被遮挡的远侧边缘减去半个模型杆宽。
+    """
+    min_rows = int(cfg.get("min_rod_rows", 8))
+    tol = float(cfg.get("width_tolerance_ratio", 0.2))
+    reasons = []
+    usable = [r for r in rows if not (r[3] or r[4])]
+    if len(usable) < len(rows):
+        reasons.append("rod_touches_roi_boundary")
+    info = {"rows_in_band": len(rows), "rows_used": 0, "occluded_side": near_side_occluded,
+            "width_px": None, "width_model_px": None}
+    if len(usable) < min_rows:
+        reasons.append("too_few_rod_rows_in_band")
+        return None, False, reasons, info
+
+    lefts = np.asarray([r[1] for r in usable])
+    rights = np.asarray([r[2] for r in usable])
+    widths = rights - lefts + 1.0
+    mid = _trimmed_mean(0.5 * (lefts + rights))
+    width = _trimmed_mean(widths)
+    info.update(rows_used=len(usable), width_px=round(width, 2))
+
+    if near_side_occluded is None:
+        model = _width_model(cfg, out_key, mid)
+        info["width_model_px"] = None if model is None else round(model, 2)
+        info["method"] = "rod_band_both_edges"
+        reliable = True
+        if model is not None and abs(width / model - 1.0) > tol:
+            reliable = False
+            reasons.append("rod_width_inconsistent_with_model")
+        return mid, reliable, reasons, info
+
+    # 近侧被前杆遮挡：只用远侧边缘。宽度模型依赖杆轴位置，迭代即可收敛。
+    far = _trimmed_mean(rights if near_side_occluded == "left" else lefts)
+    sign = -1.0 if near_side_occluded == "left" else 1.0
+    axis = far + sign * 0.5 * (width - 1.0)
+    model = None
+    for _ in range(3):
+        model = _width_model(cfg, out_key, axis)
+        if model is None:
+            break
+        axis = far + sign * 0.5 * (model - 1.0)
+    info["method"] = "rod_band_far_edge_width_model"
+    if model is None:
+        reasons.append("width_model_missing_for_occluded_rod")
+        return axis, False, reasons, info
+    info["width_model_px"] = round(model, 2)
+    reliable = True
+    # 可见宽度不可能明显大于整杆宽度；若大于则说明遮挡判断或分割有误。
+    if width > model * (1.0 + tol):
+        reliable = False
+        reasons.append("rod_width_inconsistent_with_model")
+    # 仅被前杆遮挡时可见比例基本恒定（地面约 0.63、在轨约 0.74）；明显更窄说明远侧边缘
+    # 也被其它物体（如机械臂）遮挡，远侧边缘不可信。
+    min_ratio = float(cfg.get("min_visible_width_ratio", 0.5))
+    if width < model * min_ratio:
+        reliable = False
+        reasons.append("visible_width_too_small_for_far_edge")
+    return axis, reliable, reasons, info
+
+
+def _near_side_contact(back_rows, front_rows, gap_px):
+    """判断前杆是否紧贴后杆一侧：取两杆在测量带重叠行的水平间隙中位数。"""
+    if not back_rows or not front_rows:
+        return None
+    front = {r[0]: r for r in front_rows}
+    gaps_left, gaps_right = [], []
+    for r in back_rows:
+        f = front.get(r[0])
+        if f is None:
+            continue
+        if f[1] < r[1]:          # 前杆在左：前杆右边缘到后杆左边缘
+            gaps_left.append(r[1] - f[2])
+        else:                    # 前杆在右：后杆右边缘到前杆左边缘
+            gaps_right.append(f[1] - r[2])
+    if len(gaps_left) >= 3 and np.median(gaps_left) <= gap_px:
+        return "left"
+    if len(gaps_right) >= 3 and np.median(gaps_right) <= gap_px:
+        return "right"
+    return None
+
+
 def _map_point(point, canonical_size, original_size):
     """将标准尺度坐标按比例映射回输入图分辨率（保持转正后的正向像素坐标系）。"""
     x, y = point
@@ -378,8 +525,15 @@ def detect_frame(image, profile="ground", scene=None, already_rotated=False):
     patch = work[y1:y2, x1:x2]
     masks = _build_color_masks(patch)
 
-    # 2. 剔除滑杆遮挡列，拟合外侧前挡边下沿直线 y = k * x + m 并检测真实物理端点
+    # 2. 剔除滑杆遮挡列，拟合外侧前挡边下沿直线 y = k * x + m。
+    #    该直线是杆轴取交点的图像参考线；拟合失败时回退到场景名义线（安装位置固定）。
     k, m = _detect_rail_line(work, cfg, masks=masks)
+    rail_line_source = "fitted"
+    if k is None or m is None:
+        x0, y0, k_nom = cfg["rail_nominal"]
+        k, m = float(k_nom), float(y0 - k_nom * x0)
+        rail_line_source = "nominal_fallback"
+    # 导轨端点仅作诊断输出，不参与行程范围或验收判定（行程范围改用模型固定值）。
     endpoints = _detect_rail_endpoints(work, k, m, cfg)
     rail_endpoints_px = (
         [_map_point(endpoints[0], (cw, ch), (ow, oh)),
@@ -388,48 +542,72 @@ def detect_frame(image, profile="ground", scene=None, already_rotated=False):
     )
 
     sliders = {"blue": None, "yellow": None}
-    if k is not None and m is not None:
-        py, px = np.indices((y2 - y1, x2 - x1))
-        gx, gy = px + x1, py + y1
-        rail_y_grid = k * gx + m
-        half_lip = cfg["lip_split_half_width"]
-        k_rod_horiz_close = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 3))
-        k_block_open = np.ones((7, 7), np.uint8)
+    py, px = np.indices((y2 - y1, x2 - x1))
+    gx, gy = px + x1, py + y1
+    rail_y_grid = k * gx + m
+    half_lip = cfg["lip_split_half_width"]
+    k_rod_horiz_close = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 3))
+    k_block_open = np.ones((7, 7), np.uint8)
+    band = cfg.get("rod_band_px", (20, 70))
 
-        for mask_key, out_key in (("blue", "blue"), ("orange", "yellow")):
-            mask = masks[mask_key]
-            upper_raw = np.where(gy < rail_y_grid - half_lip, mask, 0).astype(np.uint8)
-            upper_mask = cv2.morphologyEx(upper_raw, cv2.MORPH_CLOSE, k_rod_horiz_close)
-            lower_mask = cv2.morphologyEx(
-                np.where(gy > rail_y_grid + half_lip, mask, 0).astype(np.uint8),
-                cv2.MORPH_OPEN,
-                k_block_open,
-            )
+    parts = {}
+    for mask_key, out_key in (("blue", "blue"), ("orange", "yellow")):
+        mask = masks[mask_key]
+        upper_raw = np.where(gy < rail_y_grid - half_lip, mask, 0).astype(np.uint8)
+        upper_mask = cv2.morphologyEx(upper_raw, cv2.MORPH_CLOSE, k_rod_horiz_close)
+        lower_mask = cv2.morphologyEx(
+            np.where(gy > rail_y_grid + half_lip, mask, 0).astype(np.uint8),
+            cv2.MORPH_OPEN,
+            k_block_open,
+        )
+        block = _extract_merged_component(lower_mask, (x1, y1), min_area=200)
+        ref_x = (block["bbox"][0], block["bbox"][2]) if block is not None else None
+        rod = _extract_merged_component(upper_mask, (x1, y1), min_area=120, ref_x_range=ref_x)
+        rows = _rod_band_rows(rod, (x1, y1), k, m, band, x2 - x1) if rod is not None else []
+        parts[out_key] = (rod, block, rows)
 
-            block = _extract_merged_component(lower_mask, (x1, y1), min_area=200)
-            ref_x = (block["bbox"][0], block["bbox"][2]) if block is not None else None
-            rod = _extract_merged_component(upper_mask, (x1, y1), min_area=120, ref_x_range=ref_x)
-            if rod is None and block is None:
-                continue
+    front = cfg.get("front_color", "blue")
+    gap = float(cfg.get("occlusion_gap_px", 8))
+    for out_key in ("blue", "yellow"):
+        rod, block, rows = parts[out_key]
+        if rod is None and block is None:
+            continue
+        other_rows = parts["yellow" if out_key == "blue" else "blue"][2]
+        near = None if out_key == front else _near_side_contact(rows, other_rows, gap)
 
-            if rod is not None:
-                x_axis = _compute_rod_axis_x(rod, x1)
-                method = "rod_outer_midpoint_median_intersection"
-                rep_part = "rod"
-                is_approx = False
-            else:
-                x_axis = block["center"][0]
-                method = "block_center_projection_approximate"
-                rep_part = "block"
-                is_approx = True
+        reasons, info, reliable = [], {}, False
+        x_axis = None
+        if rod is not None:
+            x_axis, reliable, reasons, info = _measure_rod(rows, out_key, cfg, near)
+            if (x_axis is not None and near is None and out_key != front
+                    and "rod_width_inconsistent_with_model" in reasons):
+                # 前杆阴影侧常不在颜色掩膜内，间隙看似大于阈值；若后杆可见宽度偏窄且前杆
+                # 就在附近（3 倍间隙内），按近侧被遮挡重新测量。
+                near_wide = _near_side_contact(rows, other_rows, 3.0 * gap)
+                if near_wide is not None and info.get("width_px") and info.get("width_model_px") \
+                        and info["width_px"] < info["width_model_px"]:
+                    x_axis, reliable, reasons, info = _measure_rod(rows, out_key, cfg, near_wide)
+                    reasons = reasons + ["occlusion_inferred_from_narrow_width"]
+        if x_axis is not None:
+            method = info.get("method", "rod_band_both_edges")
+            rep_part, is_approx = "rod", False
+        else:
+            source = block if block is not None else rod
+            x_axis = source["center"][0]
+            method = "block_center_projection_approximate"
+            rep_part, is_approx, reliable = "block" if block is not None else "rod", True, False
+            reasons = reasons + ["shaft_axis_not_measured"]
 
-            y_axis = float(k * x_axis + m)
-            sliders[out_key] = {
-                "pixel_xy": _map_point((x_axis, y_axis), (cw, ch), (ow, oh)),
-                "reference_method": method,
-                "representative_part": rep_part,
-                "approximate": is_approx,
-            }
+        y_axis = float(k * x_axis + m)
+        sliders[out_key] = {
+            "pixel_xy": _map_point((x_axis, y_axis), (cw, ch), (ow, oh)),
+            "reference_method": method,
+            "representative_part": rep_part,
+            "approximate": is_approx,
+            "reliable": bool(reliable),
+            "reasons": reasons,
+            "measurement": info,
+        }
 
     complete = sliders["blue"] is not None and sliders["yellow"] is not None
     return {
@@ -438,6 +616,7 @@ def detect_frame(image, profile="ground", scene=None, already_rotated=False):
         "input_size_px": [ow, oh],
         "status": "complete" if complete else "partial_or_missing",
         "position_definition": "shaft_axis_intersection_with_image_reference_line",
+        "rail_line": {"k": round(float(k), 6), "m": round(float(m), 3), "source": rail_line_source},
         "rail_endpoints_px": rail_endpoints_px,
         "sliders": sliders,
     }
