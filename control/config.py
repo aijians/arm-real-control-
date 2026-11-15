@@ -71,6 +71,15 @@ def save_json(result, path):
 
 
 def validate_config(config):
+    planning = config.get("planning", {})
+    if "return_upper_min_deg" in planning:
+        value = planning["return_upper_min_deg"]
+        target = planning.get("return_q_deg", [170., 4.])
+        if (type(value) not in (int, float) or not math.isfinite(value) or value < 0
+                or not isinstance(target, (list, tuple)) or len(target) != 2
+                or type(target[0]) not in (int, float) or not math.isfinite(target[0])
+                or value >= target[0]):
+            raise ValueError("invalid planning.return_upper_min_deg")
     task_start_pid_settings(config.get("hardware", {}))
     recovery_settings(config.get("hardware", {}))
     motion_policy_settings(config.get("hardware", {}))

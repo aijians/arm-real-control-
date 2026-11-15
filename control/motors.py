@@ -15,7 +15,7 @@ import termios
 import threading
 import time
 
-from .trajectory import WaypointCursor, GoalQualification, timed_free_points
+from .trajectory import WaypointCursor, GoalQualification, timed_free_points, return_goal_lower_bounds
 from .kinematics import PlanarArm
 from .recovery import SpeedRecovery, recovery_settings
 from .timed_downshift import TimedSpeedDownshift, timed_downshift_settings
@@ -1221,7 +1221,8 @@ class MotorPair:
             end_at = None
             confirmation_after = None
             qualifier = GoalQualification(self.config["angle_tolerance_deg"],
-                self.config["still_speed_deg_s"], self.config["goal_hold_s"], self.config["stable_s"])
+                self.config["still_speed_deg_s"], self.config["goal_hold_s"], self.config["stable_s"],
+                lower_bounds_deg=return_goal_lower_bounds(phase))
             deadline = started + points[-1][0] + self.config["move_timeout_margin_s"]
             while True:
                 if self._halt_event.is_set():
@@ -1405,7 +1406,8 @@ class MotorPair:
             qualifier = GoalQualification(self.config["angle_tolerance_deg"],
                                           self.config["still_speed_deg_s"],
                                           self.config["goal_hold_s"], self.config["stable_s"],
-                                          active_axes=self._active_axes)
+                                          active_axes=self._active_axes,
+                                          lower_bounds_deg=return_goal_lower_bounds(phase))
             started = time.monotonic()
             trace.started = started
             target = cursor.target()

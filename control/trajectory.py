@@ -288,6 +288,17 @@ class FeedbackClock:
         return self.target()
 
 
+def return_goal_lower_bounds(phase):
+    """Only the explicit home-return Free may use one-sided upper acceptance."""
+    if "return_upper_min_deg" not in phase:
+        return None
+    value = phase["return_upper_min_deg"]
+    if (phase.get("phase") != "free" or phase.get("route") != "return_home"
+            or type(value) not in (int, float) or not math.isfinite(value)):
+        raise ValueError("invalid return_upper_min_deg phase")
+    return (float(value), None)
+
+
 class GoalQualification:
     """Qualify endpoint feedback, retaining time across an isolated speed blip.
 
@@ -297,7 +308,12 @@ class GoalQualification:
     def __init__(self, tolerance_deg, still_deg_s, stable_s, arrival_s=0.3,
                  *, hard_error_deg=None, hard_speed_deg_s=None,
                  unstable_window_s=0.5, unstable_samples=3, active_axes=None,
-                 steady_angle_deg=0.05, tolerate_speed_blip=True):
+                 steady_angle_deg=0.05, tolerate_speed_blip=True, lower_bounds_deg=None):
+        self.lower_bounds_deg = None if lower_bounds_deg is None else tuple(lower_bounds_deg)
+        if self.lower_bounds_deg is not None and any(
+                v is not None and (type(v) not in (int, float) or not math.isfinite(v))
+                for v in self.lower_bounds_deg):
+            raise ValueError("invalid goal lower bounds")
         self.tolerance = tolerance_deg
         self.still = still_deg_s
         self.required = stable_s
@@ -364,6 +380,17 @@ class GoalQualification:
         fresh = self.last_stamp is None or stamp > self.last_stamp
         errors = [abs(math.degrees(a - b))
                   for a, b, enabled in zip(state['q_rad'], goal, active) if enabled]
+        if self.lower_bounds_deg is not None:
+            if len(self.lower_bounds_deg) != len(goal):
+                raise ValueError("goal lower bound joint counts differ")
+            # Threshold axes contribute zero acceptance error only strictly above
+            # their bound; finite failing errors preserve hold-failure recording.
+            errors = [error if bound is None else
+                      (0.0 if q > math.radians(bound) else
+                       self.hard_error_deg + max(0.0, bound - math.degrees(q)))
+                      for error, (q, bound) in zip(errors,
+                          ((q, bound) for q, bound, enabled in
+                           zip(state['q_rad'], self.lower_bounds_deg, active) if enabled))]
         speeds = [abs(math.degrees(v))
                   for v, enabled in zip(state['speed_rad_s'], active) if enabled]
         errors_ok = at_endpoint and all(e <= self.tolerance + 1e-9 for e in errors)

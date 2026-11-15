@@ -66,6 +66,12 @@ class TaskRunner:
                        for value in self.return_q_deg)):
             raise ValueError("planning.return_q_deg must contain two finite model angles")
         self.return_q_deg = list(self.return_q_deg)
+        self.return_upper_min_deg = self.config.get("planning", {}).get("return_upper_min_deg")
+        if self.return_upper_min_deg is not None:
+            self.return_upper_min_deg = _finite_setting(
+                self.return_upper_min_deg, "planning.return_upper_min_deg")
+            if self.return_upper_min_deg >= self.return_q_deg[0]:
+                raise ValueError("planning.return_upper_min_deg must be below return upper target")
 
     def legs(self, task, positions, slider_limits_x_mm):
         task = normalize_task(task)
@@ -610,9 +616,17 @@ class TaskRunner:
             result["return_motion"] = {"target_q_deg": list(self.return_q_deg)}
             return_q_rad = [math.radians(value) for value in self.return_q_deg]
             print("[motion] return target: upper=%.2f deg, lower=%.2f deg" % tuple(self.return_q_deg), flush=True)
+            if self.return_upper_min_deg is not None:
+                result["return_motion"]["upper_min_deg_exclusive"] = self.return_upper_min_deg
+                print("[motion] return acceptance: upper > %.2f deg; lower target=%.2f deg; still/hold required" %
+                      (self.return_upper_min_deg, self.return_q_deg[1]), flush=True)
             def return_home(attempt):
-                state["q_rad"] = self._move(self.planner.free(state["q_rad"], return_q_rad,
-                    state["sliders_x_mm"], direction=self.tool_direction), attempt)
+                phase = self.planner.free(state["q_rad"], return_q_rad,
+                    state["sliders_x_mm"], direction=self.tool_direction)
+                phase["route"] = "return_home"
+                if self.return_upper_min_deg is not None:
+                    phase["return_upper_min_deg"] = self.return_upper_min_deg
+                state["q_rad"] = self._move(phase, attempt)
             self._stage("return", state, result["return_motion"], return_home)
             result["status"] = "completed"
         except KeyboardInterrupt:
