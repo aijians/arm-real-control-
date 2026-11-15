@@ -17,8 +17,8 @@ from virtual_drive import config
 
 
 PID = {"enabled": True,
-       "upper": {"angle": {"kp":50,"ki":15,"kd":0}, "speed": {"kp":650,"ki":50,"kd":0}},
-       "lower": {"angle": {"kp":50,"ki":0,"kd":0}, "speed": {"kp":500,"ki":30,"kd":0}}}
+       "upper": {"angle": {"kp":50,"ki":0,"kd":0}, "speed": {"kp":500,"ki":25,"kd":0}},
+       "lower": {"angle": {"kp":50,"ki":0,"kd":0}, "speed": {"kp":500,"ki":25,"kd":0}}}
 
 
 def hardware():
