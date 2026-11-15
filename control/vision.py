@@ -18,6 +18,11 @@ class VisionError(RuntimeError):
     pass
 
 
+# 肩轴坐标系模型固定行程（mm）：蓝左止挡 −46.56、橙右止挡 13.44（CAD），
+# 蓝右端 −2.06 / 橙左端 −31.06 按两杆中心距 15.5 mm（含 0.5 mm 预留间隙）。
+DEFAULT_FIXED_SLIDER_LIMITS_X_MM = {"蓝": [-46.56, -2.06], "橙": [-31.06, 13.44]}
+
+
 def _finite(value, name):
     if isinstance(value, bool):
         raise VisionError(name + " must be finite")
@@ -74,6 +79,20 @@ class Vision:
                 or self.min_rail_span_mm <= 0 or self.min_rail_span_mm >= self.max_rail_span_mm
                 or self.limit_position_tolerance_mm < 0):
             raise VisionError("invalid rail_geometry parameters")
+
+        # 行程范围采用模型固定值（导轨与滑杆安装位置确定，误差约 1 mm）；导轨端点识别仅作诊断。
+        fixed = config.get("fixed_slider_limits_x_mm", DEFAULT_FIXED_SLIDER_LIMITS_X_MM)
+        try:
+            self.fixed_limits = {c: [_finite(v, "fixed_slider_limits_x_mm") for v in fixed[c]]
+                                 for c in ("蓝", "橙")}
+        except (KeyError, TypeError) as exc:
+            raise VisionError("fixed_slider_limits_x_mm must contain 蓝 and 橙 [lo, hi]") from exc
+        if any(len(v) != 2 or v[0] >= v[1] for v in self.fixed_limits.values()):
+            raise VisionError("invalid fixed_slider_limits_x_mm")
+        self.beyond_stop_tolerance_mm = _finite(
+            config.get("beyond_stop_tolerance_mm", 2.5), "beyond_stop_tolerance_mm")
+        if self.beyond_stop_tolerance_mm < 0:
+            raise VisionError("invalid beyond_stop_tolerance_mm")
 
         self.timeout = _finite(config.get("capture_timeout_s", 20.0), "capture_timeout_s")
         self.max_age = _finite(config.get("max_frame_age_s", 3.0), "max_frame_age_s")
@@ -227,16 +246,49 @@ class Vision:
         if positions["蓝"] >= positions["橙"]:
             raise VisionError("slider_order_invalid: 蓝 must be left of 橙")
 
-        rail_observation = {"endpoints_px": pixels.get("rail_endpoints_px")}
-        slider_limits_x_mm = self._compute_slider_limits(world, positions, rail_observation)
+        # 导轨端点与由其推出的行程只作诊断记录，不参与通过/拒绝；行程采用模型固定值。
+        rail_observation = {"endpoints_px": pixels.get("rail_endpoints_px"),
+                            "rail_line": pixels.get("rail_line"),
+                            "limits_source": "fixed_model"}
+        diagnostic = {}
+        self._compute_slider_limits(world, positions, diagnostic)
+        rail_observation["endpoint_diagnostic"] = diagnostic
 
         return {
             "sliders_x_mm": positions,
-            "slider_limits_x_mm": slider_limits_x_mm,
+            "slider_limits_x_mm": {c: list(v) for c, v in self.fixed_limits.items()},
+            "reliability": self._reliability(pixels, positions),
             "rail_observation": rail_observation,
             "stamp_monotonic_s": None,
             "approximate": bool(world.get("is_approximate", True)),
         }
+
+    def _reliability(self, pixels, positions):
+        """合并识别层可靠性（杆宽一致、测量行数、遮挡补偿）与物理止挡检查。"""
+        result = {}
+        detected = pixels.get("sliders") or {}
+        tol = self.beyond_stop_tolerance_mm
+        for external, color in (("blue", "蓝"), ("yellow", "橙")):
+            item = detected.get(external) or (detected.get("orange") if external == "yellow" else None) or {}
+            reasons = list(item.get("reasons", []))
+            reliable = bool(item.get("reliable", True))
+            lo, hi = self.fixed_limits[color]
+            x = positions[color]
+            beyond = max(lo - x, x - hi, 0.)
+            if beyond > tol:
+                reliable = False
+                reasons.append("reading_beyond_physical_stop")
+            measurement = item.get("measurement") or {}
+            result[color] = {
+                "reliable": reliable, "reasons": reasons,
+                "method": item.get("reference_method"),
+                "occluded_side": measurement.get("occluded_side"),
+                "width_px": measurement.get("width_px"),
+                "width_model_px": measurement.get("width_model_px"),
+                "rows_used": measurement.get("rows_used"),
+                "beyond_fixed_limits_mm": beyond,
+            }
+        return result
 
     def read(self, after_monotonic_s=None):
         started = time.monotonic()

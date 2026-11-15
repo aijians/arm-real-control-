@@ -12,7 +12,8 @@
       170.0,
       4.0
     ],
-    "waypoint_min_axis_step_deg": 0.1
+    "waypoint_min_axis_step_deg": 0.1,
+    "arrival_window_mm": 2.5
   },
   "sliders": {
     "橙": {
@@ -157,7 +158,14 @@
   "verification": {
     "tolerance_mm": 0.5,
     "samples": 3,
-    "interval_s": 0.2
+    "interval_s": 0.2,
+    "endpoint_window_mm": [
+      2.5,
+      1.0
+    ],
+    "stationary_drift_mm": 1.0,
+    "unreliable_extra_samples": 3,
+    "force_pass_unreliable": false
   },
   "retry_limit": 3,
   "vision": {
@@ -183,7 +191,18 @@
     "rail_geometry": {
       "center_inset_mm": 9.0,
       "occupied_end_clearance_mm": 15.5
-    }
+    },
+    "fixed_slider_limits_x_mm": {
+      "蓝": [
+        -46.56,
+        -2.06
+      ],
+      "橙": [
+        -31.06,
+        13.44
+      ]
+    },
+    "beyond_stop_tolerance_mm": 2.5
   },
   "paths": {
     "task_file": "input/task.txt",

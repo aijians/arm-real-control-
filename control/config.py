@@ -83,6 +83,45 @@ def validate_config(config):
                         ("tolerance_mm", verify["tolerance_mm"]), ("interval_s", verify["interval_s"])]:
         if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
             raise ValueError("invalid " + name)
+    if "endpoint_window_mm" in verify:
+        ep_win = verify["endpoint_window_mm"]
+        if (not isinstance(ep_win, (list, tuple)) or len(ep_win) != 2
+                or any(type(v) not in (int, float) or not math.isfinite(v) or v < 0 for v in ep_win)):
+            raise ValueError("invalid verification.endpoint_window_mm")
+    if "stationary_drift_mm" in verify:
+        val = verify["stationary_drift_mm"]
+        if type(val) not in (int, float) or not math.isfinite(val) or val <= 0:
+            raise ValueError("invalid verification.stationary_drift_mm")
+    if "unreliable_extra_samples" in verify:
+        val = verify["unreliable_extra_samples"]
+        if type(val) is not int or not 0 <= val <= 10:
+            raise ValueError("invalid verification.unreliable_extra_samples")
+    # 视觉不可靠时的强制通过开关（用户要求保留，默认 false）。
+    if "force_pass_unreliable" in verify and not isinstance(verify["force_pass_unreliable"], bool):
+        raise ValueError("invalid verification.force_pass_unreliable")
+
+    planning = config.get("planning", {})
+    if "arrival_window_mm" in planning:
+        val = planning["arrival_window_mm"]
+        if type(val) not in (int, float) or not math.isfinite(val) or val < 0:
+            raise ValueError("invalid planning.arrival_window_mm")
+
+    vision = config.get("vision", {})
+    if "fixed_slider_limits_x_mm" in vision:
+        fl = vision["fixed_slider_limits_x_mm"]
+        if not isinstance(fl, dict):
+            raise ValueError("invalid vision.fixed_slider_limits_x_mm")
+        for color in ("橙", "蓝"):
+            bounds = fl.get(color)
+            if (not isinstance(bounds, (list, tuple)) or len(bounds) != 2
+                    or any(type(v) not in (int, float) or not math.isfinite(v) for v in bounds)
+                    or bounds[0] >= bounds[1]):
+                raise ValueError("invalid vision.fixed_slider_limits_x_mm." + color)
+    if "beyond_stop_tolerance_mm" in vision:
+        val = vision["beyond_stop_tolerance_mm"]
+        if type(val) not in (int, float) or not math.isfinite(val) or val <= 0:
+            raise ValueError("invalid vision.beyond_stop_tolerance_mm")
+
     for color in ("橙", "蓝"):
         slider = config["sliders"][color]
         if type(slider["y_mm"]) not in (int, float) or not math.isfinite(slider["y_mm"]):

@@ -1,4 +1,4 @@
-"""Camera-free geometry contract checks, including installation translation."""
+"""Camera-free geometry contract checks: fixed model limits, diagnostic-only rail endpoints."""
 import copy
 import json
 import unittest
@@ -8,12 +8,13 @@ from unittest.mock import patch
 import numpy as np
 import cv2
 
-from control.vision import Vision, VisionError
+from control.vision import Vision, VisionError, DEFAULT_FIXED_SLIDER_LIMITS_X_MM
 from control.tasks import TaskRunner
 from control.config import load_config
 from vision_tools.pixel_to_world import DEFAULT_CALIBRATION
 
 ROOT = Path(__file__).resolve().parents[1]
+FIXED = {"蓝": [-46.56, -2.06], "橙": [-31.06, 13.44]}
 
 
 def pixel_for_x(x, edge=False):
@@ -26,14 +27,18 @@ def pixel_for_x(x, edge=False):
     return pixels.reshape(2).tolist()
 
 
-def detection(shift=0.):
+def detection(shift=0., blue=-41., orange=12., blue_reliable=None):
+    sliders = {color: {'pixel_xy': pixel_for_x(x+shift),
+                       'bbox': [350., 350., 450., 550.],
+                       'part_boxes': {'rod': [350., 350., 450., 450.]}}
+               for color, x in [('blue', blue), ('orange', orange)]}
+    if blue_reliable is not None:
+        sliders['blue'].update(reliable=blue_reliable,
+                               reasons=[] if blue_reliable else ['rod_width_inconsistent_with_model'])
     return {'schema_version': 1, 'profile': 'ground', 'input_size_px': [1920,1080],
             'position_definition': 'shaft_axis_intersection_with_image_reference_line',
             'rail_endpoints_px': [pixel_for_x(-50.+shift, edge=True), pixel_for_x(28.+shift, edge=True)],
-            'sliders': {color: {'pixel_xy': pixel_for_x(x+shift),
-                'bbox': [350., 350., 450., 550.],
-                'part_boxes': {'rod': [350., 350., 450., 450.]}}
-                for color, x in [('blue', -41.), ('orange', 19.)]}}
+            'sliders': sliders}
 
 
 class RailVisionTests(unittest.TestCase):
@@ -45,15 +50,18 @@ class RailVisionTests(unittest.TestCase):
     def observe(self, d):
         return self.vision._detect(self.image, lambda *a, **kw: d, 'offline_test')
 
-    def test_limits_follow_actual_edges_with_nine_mm_inset(self):
-        for shift in (-8., 0., 6.5):
+    def test_positions_follow_pixels_and_limits_stay_fixed(self):
+        for shift in (-1., 0., 1.):
             observed = self.observe(detection(shift))
             self.assertAlmostEqual(observed['sliders_x_mm']['蓝'], -41.+shift, places=8)
-            self.assertAlmostEqual(observed['sliders_x_mm']['橙'], 19.+shift, places=8)
-            for color, expected in [('蓝', [-41., 3.5]), ('橙', [-25.5, 19.])]:
-                limits=observed['slider_limits_x_mm'][color]
-                self.assertAlmostEqual(limits[0], expected[0]+shift, places=8)
-                self.assertAlmostEqual(limits[1], expected[1]+shift, places=8)
+            self.assertAlmostEqual(observed['sliders_x_mm']['橙'], 12.+shift, places=8)
+            self.assertEqual(observed['slider_limits_x_mm'], FIXED)
+            self.assertEqual(observed['rail_observation']['limits_source'], 'fixed_model')
+            self.assertTrue(all(r['reliable'] for r in observed['reliability'].values()))
+
+    def test_config_and_code_default_fixed_limits_agree(self):
+        self.assertEqual(self.config['vision']['fixed_slider_limits_x_mm'], FIXED)
+        self.assertEqual(DEFAULT_FIXED_SLIDER_LIMITS_X_MM, FIXED)
 
     def test_two_pin_affine_correction_is_not_applied(self):
         # Even a leftover key cannot snap a new installation to old anchors.
@@ -64,58 +72,57 @@ class RailVisionTests(unittest.TestCase):
         self.assertAlmostEqual(result['sliders_x_mm']['蓝'], -41.)
         self.assertNotIn('rail_x_correction', result)
 
-    def test_no_endpoints_preserves_pin_measurement_but_cannot_plan(self):
+    def test_missing_endpoints_no_longer_block_planning(self):
         d = detection(); d['rail_endpoints_px'] = None
         observed = self.observe(d)
         self.assertAlmostEqual(observed['sliders_x_mm']['蓝'], -41.)
-        self.assertIsNone(observed['slider_limits_x_mm'])
-        self.assertEqual(observed['rail_observation']['reason'], 'rail_endpoints_missing')
-        with self.assertRaisesRegex(Exception, 'slider_limits_unavailable'):
-            TaskRunner(None, self.config).legs({'intent':'push_to_end','color':'蓝'},
-                observed['sliders_x_mm'], observed['slider_limits_x_mm'])
+        self.assertEqual(observed['slider_limits_x_mm'], FIXED)
+        self.assertEqual(observed['rail_observation']['endpoint_diagnostic']['reason'],
+                         'rail_endpoints_missing')
+        goals, _ = TaskRunner(None, self.config).legs({'intent':'push_to_end','color':'蓝'},
+            observed['sliders_x_mm'], observed['slider_limits_x_mm'])
+        self.assertEqual(goals, [-2.06])
 
-    def test_reversed_pixel_endpoints_are_rejected(self):
-        d=detection(); d['rail_endpoints_px'].reverse()
-        result=self.observe(d)
-        self.assertIsNone(result['slider_limits_x_mm'])
-        self.assertEqual(result['rail_observation']['reason'], 'rail_span_out_of_range')
+    def test_bad_endpoints_are_reported_only_as_diagnostics(self):
+        d = detection(); d['rail_endpoints_px'].reverse()
+        result = self.observe(d)
+        self.assertEqual(result['slider_limits_x_mm'], FIXED)
+        self.assertEqual(result['rail_observation']['endpoint_diagnostic']['reason'],
+                         'rail_span_out_of_range')
 
     def test_edge_and_shaft_have_distinct_projection_planes(self):
-        observed=self.observe(detection())
-        self.assertNotEqual(DEFAULT_CALIBRATION['rail_lip_y_mm'],DEFAULT_CALIBRATION['plane_y_mm'])
-        self.assertAlmostEqual(observed['rail_observation']['span_mm'],78.)
+        observed = self.observe(detection())
+        self.assertNotEqual(DEFAULT_CALIBRATION['rail_lip_y_mm'], DEFAULT_CALIBRATION['plane_y_mm'])
+        self.assertAlmostEqual(observed['rail_observation']['endpoint_diagnostic']['span_mm'], 78.)
 
-    def test_impossible_insets_fail(self):
-        self.vision.center_inset_mm=50.
-        result=self.observe(detection())
-        self.assertIsNone(result['slider_limits_x_mm'])
-        self.assertEqual(result['rail_observation']['reason'], 'rail_too_short_for_center_insets')
+    def test_detector_reliability_is_forwarded(self):
+        result = self.observe(detection(blue_reliable=False))
+        self.assertFalse(result['reliability']['蓝']['reliable'])
+        self.assertIn('rod_width_inconsistent_with_model', result['reliability']['蓝']['reasons'])
+        self.assertTrue(result['reliability']['橙']['reliable'])
 
-    def test_near_end_pin_measurement_does_not_expand_motion_limits(self):
-        d=detection()
-        # Orange's nominal upper bound is 19; allow a measured 2.05 mm residual.
-        d['sliders']['orange']['pixel_xy']=pixel_for_x(21.05)
-        result=self.observe(d)
-        self.assertAlmostEqual(result['rail_observation']['outside_by_mm']['橙'],2.05)
-        self.assertAlmostEqual(result['slider_limits_x_mm']['蓝'][1],3.5)
-        self.assertAlmostEqual(result['slider_limits_x_mm']['橙'][1],19.)
+    def test_reading_beyond_physical_stop_is_unreliable(self):
+        # Orange's fixed end is 13.44; a 2.4 mm residual is tolerated, 2.6 mm is not.
+        ok = self.observe(detection(orange=15.84))
+        self.assertTrue(ok['reliability']['橙']['reliable'])
+        bad = self.observe(detection(orange=16.04))
+        self.assertFalse(bad['reliability']['橙']['reliable'])
+        self.assertIn('reading_beyond_physical_stop', bad['reliability']['橙']['reasons'])
+        self.assertAlmostEqual(bad['reliability']['橙']['beyond_fixed_limits_mm'], 2.6)
 
-    def test_large_residual_and_truncated_rail_still_fail(self):
-        for endpoint, orange, reason in [(28.,21.51,'slider_position_outside_limits'),
-                                         (0.,19.,'rail_span_out_of_range')]:
-            d=detection()
-            d['rail_endpoints_px'][1]=pixel_for_x(endpoint,edge=True)
-            d['sliders']['orange']['pixel_xy']=pixel_for_x(orange)
-            result=self.observe(d)
-            self.assertIsNone(result['slider_limits_x_mm'])
-            self.assertEqual(result['rail_observation']['reason'],reason)
+    def test_explicit_beyond_stop_tolerance_is_preserved(self):
+        config = copy.deepcopy(self.config['vision'])
+        config['beyond_stop_tolerance_mm'] = 1.5
+        v = Vision(ROOT, config)
+        d = detection(orange=15.44)
+        result = v._detect(self.image, lambda *a, **kw: d, 'offline_test')
+        self.assertFalse(result['reliability']['橙']['reliable'])
 
-    def test_explicit_measurement_tolerance_is_preserved(self):
-        config=copy.deepcopy(self.config['vision'])
-        config['rail_geometry']['limit_position_tolerance_mm']=1.5
-        v=Vision(ROOT,config)
-        d=detection();d['sliders']['orange']['pixel_xy']=pixel_for_x(21.)
-        self.assertIsNone(v._detect(self.image, lambda *a,**kw:d,'offline_test')['slider_limits_x_mm'])
+    def test_invalid_fixed_limits_are_rejected(self):
+        config = copy.deepcopy(self.config['vision'])
+        config['fixed_slider_limits_x_mm'] = {'蓝': [-2., -40.], '橙': [-31., 13.]}
+        with self.assertRaises(VisionError):
+            Vision(ROOT, config)
 
     def test_live_report_keeps_frame_identity_for_video_diagnosis(self):
         from unittest.mock import Mock
@@ -135,6 +142,15 @@ class RailVisionTests(unittest.TestCase):
         for slider in config['sliders'].values():
             self.assertNotIn('x_limits_mm',slider)
             self.assertNotIn('end_x_mm',slider)
+
+    def test_force_pass_switch_is_accepted_by_config_validation(self):
+        from control.config import validate_config
+        config = copy.deepcopy(self.config)
+        config['verification']['force_pass_unreliable'] = True
+        validate_config(config)
+        config['verification']['force_pass_unreliable'] = 'yes'
+        with self.assertRaises(ValueError):
+            validate_config(config)
 
 
 if __name__=='__main__': unittest.main()

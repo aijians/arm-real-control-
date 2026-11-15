@@ -285,7 +285,7 @@ def pixel_to_world(pixel_xy, image_size_px=(1920, 1080), calibration=None,
 
 
 def convert_detections(payload, calibration=None, rail_z_mm=None):
-    """接收 detect_sliders.py 的 JSON 字典；转换滑杆坐标与真实导轨两端点坐标。"""
+    """接收 detect_sliders.py 的 JSON 字典；转换滑杆坐标与诊断用导轨端点坐标，并透传可靠性字段。"""
     if not isinstance(payload, dict):
         raise ValueError("检测输入必须是 JSON 对象")
     if payload.get("schema_version") != 1:
@@ -319,7 +319,18 @@ def convert_detections(payload, calibration=None, rail_z_mm=None):
         if not isinstance(item, dict) or "pixel_xy" not in item:
             raise ValueError(color + " 检测项必须提供 pixel_xy")
         point = pixel_to_world(item["pixel_xy"], size, config, rail_z_mm)
-        for key in ("reference_method", "representative_part", "approximate"):
+        for key in (
+            "method",
+            "reference_method",
+            "representative_part",
+            "approximate",
+            "occluded_side",
+            "rows_used",
+            "width_px",
+            "width_model_px",
+            "reliable",
+            "reasons",
+        ):
             if key in item:
                 point[key] = item[key]
         reference_method = item.get("reference_method", "")
@@ -329,7 +340,6 @@ def convert_detections(payload, calibration=None, rail_z_mm=None):
             point["is_approximate"] = True
         converted[color] = point
 
-    # 左、右导轨物理端点统一按前挡边平面 rail_lip_y_mm (174.5 mm) 求交
     rail_endpoints = None
     eps_px = payload.get("rail_endpoints_px")
     if eps_px is None:
@@ -361,6 +371,9 @@ def convert_detections(payload, calibration=None, rail_z_mm=None):
             converted[c] is not None and converted[c]["is_approximate"] for c in ("blue", "yellow")),
         "calibration": config,
         "distortion_handling": _distortion_handling(config),
+        "rail_line_kb": payload.get("rail_line_kb"),
+        "rail_line_fallback": bool(payload.get("rail_line_fallback", False)),
+        "rail_endpoints_px": eps_px,
         "rail_endpoints": rail_endpoints,
         "sliders": converted,
     }

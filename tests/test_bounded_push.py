@@ -130,7 +130,7 @@ class BoundedPushTests(unittest.TestCase):
         runner = TaskRunner(planner, config, motors, vision)
         runner._withdraw = lambda *_: None
         runner.legs({"intent": "push_to_end", "color": "蓝"},
-                    {"蓝": start, "橙": 15.}, {"蓝": [-20., 0.], "橙": [-10., 15.]})
+                    {"蓝": start, "橙": 15.}, {"蓝": [-20., 5.], "橙": [-10., 15.]})
         return runner
 
     def run_leg(self, runner, goal=0.):
@@ -157,8 +157,8 @@ class BoundedPushTests(unittest.TestCase):
         self.assertEqual([p["reference_start_mm"][0] for p in runner.planner.corrections], [0., 1.])
         self.assertEqual([p["reference_target_mm"][0] for p in runner.planner.corrections], [1., 2.])
         self.assertTrue(all(p["task_target_x_mm"] == 0. for p in runner.planner.corrections))
-        self.assertTrue(all(p["limits"] == (-20., 0.) for p in runner.planner.corrections))
-        self.assertEqual(runner.targets.bounds("蓝"), (-20., 0.))
+        self.assertTrue(all(p["limits"] == (-20., 5.) for p in runner.planner.corrections))
+        self.assertEqual(runner.targets.bounds("蓝"), (-20., 5.))
         self.assertEqual(record["target_x_mm"], 0.)
         self.assertEqual(runner.withdraw_extension_mm, 2.)
         self.assertAlmostEqual(state["sliders_x_mm"]["蓝"], -.4)

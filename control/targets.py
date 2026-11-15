@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import math
 
 COLORS = ("橙", "蓝")
+DEFAULT_FIXED_SLIDER_LIMITS_X_MM = {"蓝": [-46.56, -2.06], "橙": [-31.06, 13.44]}
 
 
 def finite_number(value, label):
@@ -49,14 +50,22 @@ class Target:
 
 
 class TargetResolver:
-    def __init__(self, config, slider_limits_x_mm):
+    def __init__(self, config, slider_limits_x_mm=None):
         self.sliders = config["sliders"]
         self.tolerance = finite_number(config["feedback"]["slider_position_tolerance_mm"], "tolerance")
         if self.tolerance <= 0:
             raise ValueError("position tolerance must be positive")
+        if slider_limits_x_mm is None:
+            slider_limits_x_mm = config.get("vision", {}).get(
+                "fixed_slider_limits_x_mm", DEFAULT_FIXED_SLIDER_LIMITS_X_MM)
+        if not isinstance(slider_limits_x_mm, dict):
+            raise ValueError("invalid slider limits")
         self.limits = {}
         for color in COLORS:
-            lo, hi = slider_limits_x_mm[color]
+            bounds = slider_limits_x_mm.get(color)
+            if not isinstance(bounds, (list, tuple)) or len(bounds) != 2:
+                raise ValueError("invalid slider limits")
+            lo, hi = bounds
             lo, hi = finite_number(lo, "lower limit"), finite_number(hi, "upper limit")
             if lo >= hi:
                 raise ValueError("invalid slider limits")

@@ -105,6 +105,28 @@ bash run.sh
 
 推动段沿用约定的实机试验策略：不因预测擦壁而拒绝推动轨迹，但保留逆解、限位、连续性和速度检查。自由移动、接近和撤离执行整臂简化包络检查。简化轮廓不能作为连续三维碰撞或实机无接触的证明。
 
+## 固定行程、遮挡识别与可靠帧验收（2026-11-15，取代下文按导轨端点定行程的部分）
+
+起因：任务 8ddc48b7 推后蓝杆读数比按端点推出的目标多 2.69 mm 并报超调，实为前方蓝杆遮挡橙杆左半、可见中点右移所致（橙杆右边缘像素未变）；导轨端点识别的波动也已大于约 1 mm 的安装误差。
+
+- **行程固定**：`vision.fixed_slider_limits_x_mm` 采用模型值，蓝 `[-46.56,-2.06]`、橙 `[-31.06,13.44]`（−2.06 已含 0.5 mm 预留间隙）。导轨端点仍识别，但只记在 `rail_observation.endpoint_diagnostic`，不参与任何判定。
+- **识别（`vision_tools/detect_sliders.py`，地面 ground 与在轨 real 共用，差异只在 `SCENES`）**：
+  - 测量带改为导轨前挡边线以上固定行（地面 20–70 px，在轨 40–80 px）。
+  - 杆宽模型 `w(u)=a+b·u` 由录像离线拟合，工具为 `vision_tools/eval_slider_detection.py calibrate-width`。
+  - 蓝杆固定在前；后杆近侧被前杆遮挡时，改用远侧边缘减半个模型杆宽（`rod_band_far_edge_width_model`）。
+  - 每根杆输出 `reliable/reasons/measurement`。两侧可见但宽度与模型差超过 20%，或远侧可见宽度低于下限（远侧也被机械臂挡住），判为不可靠。
+  - 在轨 ROI 上沿改为 80，以覆盖左端蓝杆。
+- **视觉层**：`reliability` 合并识别层结果与“读数越过固定止挡超过 `beyond_stop_tolerance_mm`（2.5）”检查。2.5 mm 用于容纳近似外参下的系统偏差：地面左止挡蓝杆读数约 −47.9～−48.7。
+- **初始确认**：连续 3 帧两色均可靠、两杆位置波动 ≤ 1 mm 才冻结目标；任务起点也按 2.5 mm 止挡容差检查。
+- **验收（`control/tasks.py`）**：
+  - 只有可靠帧计入；另一根杆相对初始读数漂移超过 `stationary_drift_mm`（1.0）也判不可靠。
+  - 不可靠帧最多补取 `unreliable_extra_samples`（3）帧；仍不可靠时报 `verification_unreliable`，不再推。
+  - `verification.force_pass_unreliable=true` 时强制通过并进入下一阶段，结果标 `forced`，状态中目标杆位置取任务目标。
+  - 端点目标使用 `endpoint_window_mm=[2.5,1.0]`（欠推/越过余量）；越过余量的读数判为不可靠而非超调。中间目标仍用 `tolerance_mm=0.5`。
+- **到位与补推**：
+  - 端点目标的模型推头 X 落在 `planning.arrival_window_mm`（±2.5）内时，settle/hold 超时、no_progress 等到位类电机错误被吸收，记于 `arrival`，之后撤离观测。
+  - 只有可靠视觉确认欠推才补推，补推后的模型推头不越过 −2.06；若推头已到终点则报 `push_correction_model_target_reached`。
+
 ## 任务与视觉闭环
 
 支持定向距离、推到指定另一端、往返三类任务。任务开始时从实际图像检测银色导轨板外边缘的两个端点，换算后生成本任务范围；不再使用模型固定全局 `x_limits_mm/end_x_mm`，也不再使用两销摆在模型端点时拟合的 `rail_x_correction`。距离超行程时截断；推到另一端只按颜色读取方向，蓝向右、橙／黄向左；一次往返从任务开始的位置出发，到另一端后返回该位置。
