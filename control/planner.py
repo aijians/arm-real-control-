@@ -2,8 +2,9 @@
 
 All positions are mm in the shoulder frame; q2 is the physical BAC angle.
 Free motion uses the selected face's rigid equivalent point, including the
-pin radius. Collision checks use only scene.json primitives. Pushes retain
-the agreed real-arm policy: straight IK interpolation without wall rejection.
+pin radius. Collision checks use only scene.json primitives. Faces with a
+minimum stem coverage certify moving contact and the actual command chords;
+other pushes retain their existing wall policy.
 """
 from __future__ import annotations
 
@@ -47,6 +48,12 @@ class Planner:
             raise PlanError("invalid_planning_parameter:waypoint_min_axis_step_deg")
         self.waypoint_min_axis_step_deg = axis_minimum
         self.arm = PlanarArm(self.config["kinematics"])
+        for direction, face in self.config["kinematics"]["faces"].items():
+            coverage = face.get("minimum_stem_coverage_mm", 0.)
+            if (type(coverage) not in (int, float) or not math.isfinite(coverage)
+                    or coverage < 0 or coverage > 4.
+                    or (coverage and "contact_segment_canonical_xy_mm" not in face)):
+                raise PlanError("invalid_minimum_stem_coverage:" + direction)
         scene_config = json.loads(resolve(self.root, self.config["paths"]["scene"]).read_text())
         self.scene = SimpleScene(scene_config)
         self.routes = scene_config["routes"]
@@ -111,13 +118,12 @@ class Planner:
     def _command_chord_clear(self, name, a, b, direction, collision_context):
         """Check the actual joint interpolation introduced by decimation.
 
-        Dense IK checks are retained, but they do not certify a longer joint
-        chord. Contact pushes retain their established wall policy; every
-        phase still checks joint limits, Cartesian line deviation and (except
-        free) the selected pushing normal. 0.1 mm is a model approximation
-        limit here, not a claim about real-arm positioning accuracy.
+        Dense IK checks do not certify a longer joint chord. Deep-contact
+        faces also check the moving stem and scene. Every phase checks limits,
+        line deviation and (except free) the pushing normal. These are model
+        approximation limits, not real-arm positioning accuracy claims.
         """
-        if name not in ("push", "push_correction"):
+        if name not in ("push", "push_correction") or collision_context is not None:
             if collision_context is None:
                 return False
             positions, contact = collision_context
@@ -142,11 +148,26 @@ class Planner:
                 fraction = sum((v-u)*d for v, u, d in zip(centre, start, edge)) / length2
                 nearest = [u + min(1., max(0., fraction))*d for u, d in zip(start, edge)]
                 error = math.dist(centre, nearest)
-            if error > .1 + 1e-9:
+            if error > self._chord_error_limit(collision_context) + 1e-9:
                 return False
             if name != "free" and self.arm.world_normal(q, direction)[0] * sign <= 0:
                 return False
         return True
+
+    def _chord_error_limit(self, context):
+        # Keep decimation error well below the existing face/stem tolerance.
+        if context is not None and context[1] and context[1].get("moving_target"):
+            return min(.1, self.scene.contact_tolerance / 4)
+        return .1
+
+    def _push_context(self, positions, color, direction, reference=None):
+        face = self.config.get("kinematics", {}).get("faces", {}).get(direction, {})
+        if not face.get("minimum_stem_coverage_mm", 0.):
+            return None
+        positions = dict(positions)
+        if reference is not None:
+            positions[color] = reference[0]
+        return positions, {"color": color, "direction": direction, "moving_target": True}
 
     def _command_points(self, name, points, direction, collision_context):
         """Select coarse command nodes while retaining reversals and corners."""
@@ -240,6 +261,12 @@ class Planner:
                 raise PlanError(str(exc)) from exc
             source_indices = None  # Subdivided nodes are between source vertices.
             timing = "fixed_period_on_joint_polyline"
+        if (_collision_context is not None and _collision_context[1]
+                and _collision_context[1].get("moving_target")):
+            self._checked_edges([p["q_rad"] for p in points], *_collision_context)
+            face = self.config["kinematics"]["faces"][metadata["direction"]]
+            metadata["minimum_stem_coverage_mm"] = face["minimum_stem_coverage_mm"]
+            metadata["contact_collision_model"] = "moving_stem_on_fixed_rail_y"
         policy_enabled = (hardware.get("motion_recovery", {}).get("enabled", False)
                           and not (name in ("free", "push", "push_correction")
                                    and timed.get("enabled", False)))
@@ -262,12 +289,33 @@ class Planner:
                 "dense_point_count": dense_count, "source_point_indices": source_indices,
                 "command_point_count": len(points),
                 "waypoint_min_step_deg": self.waypoint_min_step_deg,
-                "command_chord_cartesian_error_limit_mm": .1, **metadata}
+                "command_chord_cartesian_error_limit_mm": self._chord_error_limit(_collision_context), **metadata}
 
     def _clear(self, q, sliders, contact=None):
+        if contact and isinstance(contact, dict) and contact.get("moving_target"):
+            color, direction = contact["color"], contact["direction"]
+            centre = self.arm.slider_center(q, direction)
+            # Before first contact the pin stays put; after contact its model
+            # follows the same fixed rail Y and commanded X, never a joint chord's Y drift.
+            position = (max(sliders[color], centre[0]) if direction == "+x"
+                        else min(sliders[color], centre[0]))
+            sliders = {**sliders, color: [position, self.config["sliders"][color]["y_mm"]]}
+            self._check_stem_coverage(q, direction, sliders[color][1])
         hit = self.scene.check(q, sliders, contact=contact)
         if hit:
             raise PlanError("collision:" + json.dumps(hit, ensure_ascii=False, sort_keys=True))
+
+    def _check_stem_coverage(self, q, direction, rail_y):
+        face = self.config["kinematics"]["faces"][direction]
+        required = face.get("minimum_stem_coverage_mm", 0.)
+        if not required:
+            return
+        segment = [self.arm.forward(q, p) for p in face["contact_segment_canonical_xy_mm"]]
+        radius = self.arm.stem_radius_mm
+        margin = min(rail_y - radius - min(p[1] for p in segment),
+                     max(p[1] for p in segment) - rail_y - radius)
+        if margin < required - 1e-9:
+            raise PlanError("insufficient_finite_face_stem_coverage")
 
     def _checked_edges(self, path, sliders, contact=None):
         # Motors interpolate angles between Cartesian IK samples. Check that
@@ -421,8 +469,8 @@ class Planner:
                 "minimum_projected_margin_mm": projected}
 
     def _checked_observation_edges(self, path, color, direction, positions, bounds, y):
-        # No new image is needed to escape: conservatively cover every
-        # possible target-slider position within the task's fixed rail limits.
+        # Cover the full rail before/after extraction. Only pre-existing
+        # forearm/stem overlaps may be opened from the contact side.
         other = {c: x for c, x in positions.items() if c != color}
         initial = self.scene.slider_sweep_margins(path[0], y, bounds)
         for (body, part, primitive), margin in initial.items():
@@ -433,6 +481,14 @@ class Planner:
         previous_y = start[1]
         previous_bodies = {item["name"]: polygon for item, polygon in self.scene.transformed_bodies(path[0])}
         overlapping_bodies = {key[0] for key, value in initial.items() if value < -1e-9}
+        # SAT penetration into the full-rail box changes when polygon axes
+        # rotate, even during an outward escape. Fix the initial physical
+        # contact normal: every initially overlapping body's front support
+        # must retreat along this same normal, with no newly overlapping body.
+        normal = self.arm.world_normal(path[0], direction)
+        deep_contact = self.config["kinematics"]["faces"][direction].get("minimum_stem_coverage_mm", 0.) > 0
+        previous_support = {body: float((previous_bodies[body] @ normal).max())
+                            for body in overlapping_bodies}
         sign = 1 if direction == "+x" else -1
         for a, b in zip([path[0]] + path[:-1], path):
             count = max(1, math.ceil(max(abs(v-u) for u, v in zip(a, b)) /
@@ -449,13 +505,17 @@ class Planner:
                     if any(sign * value > 1e-9 for value in change[:, 0]) or any(value > 1e-9 for value in change[:, 1]):
                         raise PlanError("observation_retreat_body_moves_toward_slider:" + body)
                 current = self.scene.slider_sweep_margins(q, y, bounds)
+                support = {body: float((bodies[body] @ normal).max())
+                           for body in overlapping_bodies}
                 for key, margin in current.items():
                     if previous[key] >= -1e-9:
                         if margin < -1e-9:
                             raise PlanError("observation_retreat_new_slider_collision:" + key[0])
-                    elif margin < previous[key] - 1e-9:
+                    elif ((deep_contact and support[key[0]] > previous_support[key[0]] + 1e-9)
+                          or (not deep_contact and margin < previous[key] - 1e-9)):
                         raise PlanError("observation_retreat_deepens_contact:" + key[0])
                 previous, previous_y, previous_bodies = current, centre[1], bodies
+                previous_support = support
         if any(value < -1e-9 for value in previous.values()):
             raise PlanError("observation_retreat_did_not_clear_slider")
         return [{"body": key[0], "primitive": key[2], "initial_margin_mm": value}
@@ -476,6 +536,7 @@ class Planner:
             _collision_context=({c: x for c, x in positions.items() if c != color}, None),
             direction=direction, route="observation_retreat", color=color,
             collision_checked=True, target_rail_bounds_x_mm=list(bounds),
+            contact_escape_check=("fixed_initial_face_normal" if self.config["kinematics"]["faces"][direction].get("minimum_stem_coverage_mm", 0.) else "sat_overlap"),
             initial_stem_overlaps=overlaps, reference_start_mm=start, reference_target_mm=end)
         # Certify the final motor-command chords too, after resampling.
         self._checked_observation_edges([p["q_rad"] for p in phase["points"]],
@@ -566,10 +627,14 @@ class Planner:
             "color", "direction", "task_target_x_mm", "feasible_x_limits_mm",
             "extension_mm", "from_reference", "reference_extension_mm",
             "reference_contact_tolerance_mm") if key in phase}
+        context = (self._push_context(positions, phase["color"], direction, reference=start)
+                   if name == "push_correction" else (positions, contact))
+        if name == "push_correction" and context is not None:
+            self._checked_edges(path, *context)
         return self._phase(name, path, distances, speed,
-            _collision_context=(positions, contact), **metadata,
+            _collision_context=context, **metadata,
             reference_start_mm=start, reference_target_mm=end,
-            retry_fixed_endpoint=True, collision_checked=name == "withdraw",
+            retry_fixed_endpoint=True, collision_checked=context is not None,
             cartesian_compensation=self._cartesian_compensation(start, end, direction))
 
     def reenter_correction(self, phase, q_start, sliders):
@@ -592,12 +657,16 @@ class Planner:
         if sign * (end[0] - centre[0]) < 0:
             raise PlanError("correction_reentry_would_reverse")
         path, distances = self._line(q, end, direction, q_goal=end_q)
+        context = self._push_context(positions, color, direction)
+        if context is not None:
+            self._checked_edges(path, *context)
         return self._phase("push_correction", path, distances, self.correction_settings["speed_mm_s"],
+            _collision_context=context,
             color=color, direction=direction, task_target_x_mm=phase["task_target_x_mm"],
             feasible_x_limits_mm=phase["feasible_x_limits_mm"],
             extension_mm=phase["extension_mm"], reference_start_mm=centre, reference_target_mm=end,
             correction_reference_start_mm=phase.get("correction_reference_start_mm", phase["reference_start_mm"]),
-            entry_mode="continuous_from_precontact", retry_fixed_endpoint=True, collision_checked=False,
+            entry_mode="continuous_from_precontact", retry_fixed_endpoint=True, collision_checked=context is not None,
             cartesian_compensation=self._cartesian_compensation(centre, end, direction))
 
     @staticmethod
@@ -661,14 +730,18 @@ class Planner:
             raise PlanError("contact_face_points_away_from_slider")
         end = [goal, start[1]]
         path, distances = self._line(q, end, direction)
+        context = self._push_context(positions, color, direction)
+        if context is not None:
+            self._checked_edges(path, *context)
         return self._phase("push", path, distances, self.settings["push_speed_mm_s"],
+            _collision_context=context,
             color=color, direction=direction, start_x_mm=start[0], target_x_mm=goal,
             feasible_x_limits_mm=[lo, hi],
             start_equivalent_center_mm=centre, target_center_mm=end,
             start_contact_error_mm=error, start_gap_mm=gap,
             precontact_offset_mm=self.offsets[direction],
             start_tangential_error_mm=tangential,
-            entry_mode="continuous_from_precontact", collision_checked=False,
+            entry_mode="continuous_from_precontact", collision_checked=context is not None,
             fixed_point_canonical_xy_mm=list(self.arm.faces[direction]["point_canonical_xy_mm"]),
             linear_step_mm=self.settings["linear_step_mm"],
             cartesian_compensation=self._cartesian_compensation(centre, end, direction))
@@ -698,12 +771,16 @@ class Planner:
             raise PlanError("contact_face_points_away_from_slider")
         end = [start[0] + sign * distance_mm, start[1]]
         path, distances = self._line(q, end, direction)
+        context = self._push_context(positions, color, direction, reference=start)
+        if context is not None:
+            self._checked_edges(path, *context)
         return self._phase("push_correction", path, distances, settings["speed_mm_s"],
+            _collision_context=context,
             color=color, direction=direction, task_target_x_mm=goal,
             feasible_x_limits_mm=[lo, hi],
             reference_start_mm=start, reference_target_mm=end,
             extension_mm=distance_mm, start_tangential_error_mm=y_error,
-            collision_checked=False,
+            collision_checked=context is not None,
             fixed_point_canonical_xy_mm=list(self.arm.faces[direction]["point_canonical_xy_mm"]),
             linear_step_mm=self.settings["linear_step_mm"],
             cartesian_compensation=self._cartesian_compensation(start, end, direction))
