@@ -8,6 +8,7 @@ import tempfile
 from .recovery import recovery_settings
 from .motion_policy import motion_policy_settings
 from .task_pid import task_start_pid_settings
+from .timed_downshift import timed_downshift_settings
 
 
 def push_correction_settings(config):
@@ -73,6 +74,7 @@ def validate_config(config):
     task_start_pid_settings(config.get("hardware", {}))
     recovery_settings(config.get("hardware", {}))
     motion_policy_settings(config.get("hardware", {}))
+    timed_downshift_settings(config.get("hardware", {}).get("free_timed_motion", {}))
     push_correction_settings(config)
     if type(config["retry_limit"]) is not int or not 0 <= config["retry_limit"] <= 3:
         raise ValueError("retry_limit must be an integer in 0..3")

@@ -18,6 +18,7 @@ import time
 from .trajectory import WaypointCursor, GoalQualification, timed_free_points
 from .kinematics import PlanarArm
 from .recovery import SpeedRecovery, recovery_settings
+from .timed_downshift import TimedSpeedDownshift, timed_downshift_settings
 from .motion_policy import MotionRecovery, motion_policy_settings
 from .goal_refresh import StationaryGoalRefresh, goal_refresh_settings
 
@@ -343,6 +344,7 @@ class MotorPair:
         if not isinstance(timed, dict) or type(timed.get("enabled", False)) is not bool:
             raise ValueError("invalid free_timed_motion.enabled")
         self.free_timed = timed.get("enabled", False)
+        self.timed_downshift_config = timed_downshift_settings(timed)
         self.goal_refresh = goal_refresh_settings(timed)
         self.free_timed_speed = _finite(timed.get("speed_deg_s", 10.),
                                         "free_timed_motion.speed_deg_s")
@@ -362,6 +364,7 @@ class MotorPair:
         self.motors = [dict(m) for m in self.config["motors"]]
         if len(self.motors) != 2:
             raise ValueError("Exactly two motors are required")
+        self._timed_downshift = TimedSpeedDownshift(self.timed_downshift_config, self.motors)
         if self.config["baudrate"] not in (9600, 19200, 38400, 57600, 115200):
             raise ValueError("Unsupported serial baudrate")
         for key in self.DEFAULTS:
@@ -1122,12 +1125,12 @@ class MotorPair:
         return math.hypot(a[0]-b[0], a[1]-b[1]) <= .1+1e-9
 
     def _timed_speed(self, motor, phase):
-        if phase in ("push", "push_correction") and motor["name"] == "upper":
-            return self.push_upper_speed
-        return self.free_timed_speed
+        base = (self.push_upper_speed if phase in ("push", "push_correction")
+                and motor["name"] == "upper" else self.free_timed_speed)
+        return self._timed_downshift.speed(motor["name"], base)
 
-    def _send_timed_target(self, q_rad, trace, *, axes=None, purpose="trajectory"):
-        """Write selected absolute A4 targets without changing angle or speed."""
+    def _send_timed_target(self, q_rad, trace, *, axes=None, purpose="trajectory", speed_limits=None):
+        """Write unchanged A4 targets with the current per-axis speed caps."""
         sent = 0
         with self._io_lock:
             for i, (motor, port, q) in enumerate(zip(self.motors, self.ports, q_rad)):
@@ -1137,21 +1140,21 @@ class MotorPair:
                     raise HardwareError("motion_halted")
                 target = round(self._motor_deg(motor, math.degrees(q)) * 100)
                 speed_deg_s = self._timed_speed(motor, trace.phase)
+                if speed_limits is not None:
+                    speed_deg_s = min(speed_deg_s, speed_limits.get(i, speed_deg_s))
                 speed = max(1, round(speed_deg_s * 100))
                 wire = multi_turn_position_frame(motor["id"], target, speed)
                 event = {"motor": motor["name"], "decision_monotonic_s": time.monotonic(),
                          "command": "0xa4", "target_motor_deg": target/100,
                          "nominal_target_motor_deg": target/100,
-                         "speed_limit_deg_s": speed_deg_s,
-                         "purpose": purpose,
+                         "speed_limit_deg_s": speed_deg_s, "purpose": purpose,
                          "bias_motor_deg": 0., "tx_hex": wire.hex(" ")}
                 try:
                     port.send(wire, cancel_event=self._halt_event)
                 except BaseException:
                     trace.record_action({**event, "status": "send_failed"})
                     raise
-                # The legacy A6 cache includes a forced direction; an A4 write
-                # invalidates that cache before a later Push/withdraw phase.
+                # A4 invalidates the forced-direction cache used by legacy A6.
                 self._last_targets[i] = None
                 self._last_target_sent_at[i] = time.monotonic()
                 self._last_target_acked[i] = False
@@ -1178,6 +1181,11 @@ class MotorPair:
         self._motion_trace = trace
         state = target = elapsed = None
         sent_count = 0
+        downshift = self._timed_downshift
+        downshift.begin_move()
+        downshift_active = downshift.settings["enabled"] and len(points) > 1
+        speed_after = [-math.inf] * len(self.motors)
+        speed_events = []
         refresh_events = []
         refresh = StationaryGoalRefresh(self.goal_refresh,
             self.config["angle_tolerance_deg"], self.config["still_speed_deg_s"], 2)
@@ -1192,6 +1200,9 @@ class MotorPair:
                                max_step_deg=self.free_timed_step,
                                period_s=self.free_timed_period,
                                automatic_retry=False, schedule=schedule)
+        trace.execution["oscillation_downshift"] = dict(downshift.settings,
+            active=downshift_active, events=speed_events,
+            axis_speed_caps_deg_s=dict(zip(downshift.names, downshift.limits)))
         trace.execution["goal_refresh"] = dict(self.goal_refresh,
             active=refresh_enabled, attempts=refresh.attempts, events=refresh_events)
         try:
@@ -1261,6 +1272,8 @@ class MotorPair:
                     ready = all(min(a, v) >= after for a, v, after in zip(
                         state["axis_stamp_monotonic_s"], state["speed_stamp_monotonic_s"],
                         confirmation_after))
+                    ready = ready and all(min(a, v) >= after for a, v, after in zip(
+                        state["axis_stamp_monotonic_s"], state["speed_stamp_monotonic_s"], speed_after))
                     completed = qualifier.observe(state, target, ready)
                     trace.execution.update(goal_stable_s=qualifier.stable_s,
                         goal_stability_resets=qualifier.resets,
@@ -1283,6 +1296,28 @@ class MotorPair:
                     if time.monotonic() >= end_at + self.config["goal_settle_timeout_s"] + self.config["goal_hold_s"]:
                         raise HardwareError("motion_goal_hold_timeout" if qualifier.armed
                                             else "motion_goal_settle_timeout")
+                    if downshift_active and not qualifier.armed:
+                        speeds = [self._timed_speed(motor, name) for motor in self.motors]
+                        requests = downshift.observe(state, target, speeds,
+                            [max(end_at, after) for after in speed_after])
+                        for i, speed in requests.items():
+                            before = time.monotonic()
+                            written = self._send_timed_target(target, trace, axes=[i],
+                                purpose="oscillation_downshift", speed_limits={i: speed})
+                            sent_count += written
+                            downshift.wrote(i, speed)
+                            speed_after[i] = time.monotonic()
+                            qualifier.reset_after_command()
+                            speed_events.append({"motor": self.motors[i]["name"],
+                                "from_speed_deg_s": speeds[i], "to_speed_deg_s": speed,
+                                "write_started_elapsed_s": before-started,
+                                "write_completed_elapsed_s": speed_after[i]-started,
+                                "target_model_deg": math.degrees(target[i])})
+                            trace.execution["oscillation_downshift"]["axis_speed_caps_deg_s"] = dict(
+                                zip(downshift.names, downshift.limits))
+                            trace.execution["motion_commands_sent"] = sent_count
+                            print("[motion] oscillation: %s speed %.0f -> %.0f deg/s" % (
+                                self.motors[i]["name"], speeds[i], speed), flush=True)
                     if refresh_enabled and not qualifier.armed:
                         axes = refresh.observe(state, target, confirmation_after)
                         if axes:

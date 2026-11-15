@@ -147,6 +147,15 @@
       "push_upper_speed_deg_s": 60.0,
       "max_step_deg": 0.2,
       "period_s": 0.05,
+      "oscillation_downshift": {
+        "enabled": true,
+        "speed_tiers_deg_s": [18.0, 30.0, 60.0],
+        "oscillation_window_s": 1.2,
+        "oscillation_amplitude_deg": 0.12,
+        "oscillation_reversal_deg": 0.04,
+        "oscillation_reversals": 3,
+        "near_goal_limit_deg": 3.5
+      },
       "goal_refresh": {
         "enabled": true,
         "stationary_s": 0.6,

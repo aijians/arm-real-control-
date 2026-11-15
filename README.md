@@ -24,11 +24,15 @@ bash run_pid_tuner.sh --axis both --real --pause-sal --host 0.0.0.0 --port 8765
 
 按用户确认的坐标关系，多圈电机角与当前单圈电机角直接对应，例如电机单圈160°即多圈160°。模型角仍使用既有 sign/ratio/offset 换算；不另加圈数偏移。A4 由驱动决定方向，Free / Push 不使用 A6 方向判断、方向余量或 `free_timed_direction_ambiguous` 分支。
 
-中途不等待到位，不按跟踪误差调整速度或目标，不做无进展恢复、偏置、重发、领先量或主从控制。反馈继续按原20Hz查询并记录，用于失联及关节限位检查；A4 回复按状态2解析并记入诊断。每点记录计划时间、实际开始/写完时间及迟到量。迟到节点按序续发，组间至少间隔50毫秒及底层 command_rate_hz 周期，不突发追赶、不跳点；调度超过重新规划的时长加 move_timeout_margin_s 则失败。
+中途不等待到位，不按跟踪误差调整目标，不做无进展恢复、偏置、领先量或主从控制。反馈继续按原20Hz查询并记录，用于失联及关节限位检查；A4 回复按状态2解析并记入诊断。每点记录计划时间、实际开始/写完时间及迟到量。迟到节点按序续发，组间至少间隔50毫秒及底层 command_rate_hz 周期，不突发追赶、不跳点；调度超过重新规划的时长加 move_timeout_margin_s 则失败。
 
 全部点发送完后才验收终点：两轴误差≤0.3°、速度≤1°/秒，稳定0.3秒后保持1秒；角度在容差内且相对上一合格反馈变化小于0.05°时，单次速度跳变不重置计时，恢复正常后沿用原计时；同轴连续不同超速样本或角度越界仍重置，硬限异常仍失败；保留5秒整定预算。各阶段失败后先停止并确认停稳，再按最新视觉和实测关节重新规划；每阶段首次执行后最多重试3次（共4次），互不占用次数。停止未确认、主动停止、硬限异常或滑杆超调直接终止。`motion_diagnostics.execution` 记录对应阶段的 `controller=free_timed/push_timed/push_correction_timed`、`position_command=0xa4`、步长、周期、schedule、中途 feedback_samples 及截断数；保留原动作末256条格式。
 
 Free 终点增加有限的原目标重申（2026-11-11 候选，待实机验证）：`hardware.free_timed_motion.goal_refresh.enabled=true`。仅在全部路径点已发送、尚未进入保持阶段时，逐轴观察新鲜角度及速度反馈；误差超过0.3°、速度≤1°/秒，连续0.6秒角度范围小于0.05°，才对该轴重发完全相同的最终A4目标和原速度字段，每轴最多2次。到位轴不重发；重发后重新等待该轴角度/速度新反馈，原5秒整定截止时间不延长。中途路径发送与阶段重试规则保持，Push/补推不启用这项措施。诊断中的 `goal_refresh` 记录每轴次数、时刻和重发前角差，动作的 `purpose=goal_refresh` 用于区分轨迹目标；`motion_commands_sent` 包含重发，`waypoints_dispatched` 只计路径点。它用于处理静止欠角时的终点重定位，不保证能够克服机构摩擦，也不是已确认的故障根因修复。离线验证：`PYTHONPATH=.:tests python3 -m unittest test_goal_refresh test_free_timed -q`。
+
+终点振荡三档降速（2026-11-15）：`hardware.free_timed_motion.oscillation_downshift` 配置低/中/高三档 `speed_tiers_deg_s=[18,30,60]`（电机轴°/秒），生产启用。Free、Push、push_correction 及使用Free的观测撤离，全部路径点发送完后，用原恢复机制的幅度/趋势/反向次数判据检查每轴新鲜角度和速度反馈：1.2秒窗口、至少3次有效反向、峰峰值≥0.12°、反向有效变化≥0.04°；距固定终点≤3.5°时才参与，覆盖c10104e6中约1.7°偏离的振荡。只对振荡轴按60→30→18逐档重发相同终点A4，每降一档清空历史，观察新的反馈窗口后才允许继续降档，不改目标角或关节折线。降档只在写入成功后生效，新档位作为该轴本任务后续进场、撤离和重试的速度上限；不会自动回升，新任务创建MotorPair后重新从高档上限开始，原配置速度更低时保持更低值。
+
+降档写入后重新等待该轴角度和速度反馈，清除旧稳定计时，但不延长原5秒整定/保持预算，不重置任务重试次数。低档仍不能稳定则沿用原超时和停机；不改PID、位置容差、视觉验收、释放或硬限检查。控制台记录`[motion] oscillation: upper speed 60 -> 30 deg/s`，诊断`execution.oscillation_downshift`记录逐轴当前上限、降档时间和原终点；A4动作标记`purpose=oscillation_downshift`。本地未部署的goal_refresh候选独立保留，不因本次降档自动启用到板端。离线验证：`PYTHONPATH=.:tests python3 -m unittest test_timed_downshift test_free_timed test_goal_qualification test_goal_refresh -q`。
 
 旧 withdraw 等其它阶段沿用原 A6 执行器；新增 observation_retreat 使用上述 Free A4。用户已报告 Free 实机通过；本次扩展后的 Push 尚未试动。
 
