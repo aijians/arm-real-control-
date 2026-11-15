@@ -49,6 +49,16 @@ class TaskPIDSettingsTests(unittest.TestCase):
         self.assertEqual(report["status"],"disabled")
         pair.halt.assert_not_called();device.assert_not_called()
 
+    def test_explicit_disabled_ignores_saved_pid_values(self):
+        h=hardware();h["task_start_pid"].update(enabled=False, upper=None, lower=None)
+        pair=Mock();report={}
+        with patch('pid_tuner.device.SerialDevice') as device:
+            initialize_task_pid(pair,h,report)
+        self.assertEqual(report,{"status":"disabled", "persistent":False,
+                                 "runtime_readback_verified":False, "writes":[]})
+        self.assertEqual(pair.mock_calls,[])
+        device.assert_not_called()
+
 
 class TaskPIDTransportTests(unittest.TestCase):
     def run_case(self, alter=None, reversed_axes=False, stop_confirmed=True):
@@ -139,7 +149,7 @@ class TaskPIDTransportTests(unittest.TestCase):
 
 
 class TaskStartupTests(unittest.TestCase):
-    def run_service(self, count, initialization_error=False):
+    def run_service(self, count, initialization_error=False, pid_enabled=True):
         import main as entry
         events=[];results=[]
         pair=MagicMock();pair.__enter__.return_value=pair
@@ -147,12 +157,16 @@ class TaskStartupTests(unittest.TestCase):
         vision.start.side_effect=lambda *a:events.append('camera')
         runner=Mock();runner.run.side_effect=lambda *a:(events.append('run') or {"status":"completed"})
         def initialize(motors,hw,report):
+            if not hw['task_start_pid']['enabled']:
+                return initialize_task_pid(motors,hw,report)
             events.append('pid');report.update(status='failed' if initialization_error else 'acknowledged')
             if initialization_error:raise HardwareError('task_pid_initialization_failed')
         def run():
             execute=runtime.call_args.args[2]
             for i in range(count):results.append(execute({'intent':'push_to_end','color':'蓝'},str(i)))
         cfg={'hardware':hardware(),'vision':{},'poll_interval_s':1.}
+        cfg['hardware']['task_start_pid']['enabled']=pid_enabled
+        output=io.StringIO()
         paths={k:'/unused/'+k for k in ('runtime_dir','model_package','video_dir','task_file','result_file')}
         modules={
             'control.language':types.SimpleNamespace(ResidentModel=Mock()),
@@ -163,15 +177,27 @@ class TaskStartupTests(unittest.TestCase):
             'control.task_pid':types.SimpleNamespace(initialize_task_pid=Mock(side_effect=initialize))}
         with patch.dict('sys.modules',modules), patch.object(entry,'load_config',return_value=(cfg,paths)), \
              patch.object(entry,'instance_lock',return_value=nullcontext()),patch.object(entry,'Inbox'), \
-             patch.object(entry,'Runtime') as runtime,patch('sys.argv',['main.py']),redirect_stdout(io.StringIO()):
+             patch.object(entry,'Runtime') as runtime,patch('sys.argv',['main.py']),redirect_stdout(output):
             runtime.return_value.run.side_effect=run
             self.assertEqual(entry.main(),0)
+        self.service_stdout=output.getvalue()
         return events,results,modules,pair
 
     def test_every_task_initializes_before_camera_and_runner(self):
         events,results,_,_=self.run_service(2)
         self.assertEqual(events,['pid','camera','run','pid','camera','run'])
         self.assertTrue(all(r['pid_initialization']['status']=='acknowledged' for r in results))
+        self.assertEqual(self.service_stdout.count('PID RAM initializing'),2)
+
+    def test_disabled_pid_runs_tasks_without_pid_writes_or_initializing_log(self):
+        events,results,_,pair=self.run_service(2,pid_enabled=False)
+        self.assertEqual(events,['camera','run','camera','run'])
+        self.assertTrue(all(r['status']=='completed' for r in results))
+        self.assertTrue(all(r['pid_initialization']['status']=='disabled' and
+                            r['pid_initialization']['writes']==[] for r in results))
+        pair.halt.assert_not_called()
+        self.assertEqual(self.service_stdout.count('PID RAM initialization disabled'),2)
+        self.assertNotIn('PID RAM initializing',self.service_stdout)
 
     def test_failed_initialization_never_starts_camera_or_task(self):
         events,results,_,_=self.run_service(1,initialization_error=True)

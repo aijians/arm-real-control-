@@ -36,14 +36,14 @@ def initialize_task_pid(motors, hardware, report):
     retained if initialization fails. Never retry writes or roll back guesses
     about the previous runtime RAM values.
     """
-    from .motors import HardwareError
-    from pid_tuner.device import SerialDevice
-
     cfg = task_start_pid_settings(hardware)
     report.update(status="disabled" if not cfg["enabled"] else "pending",
                   persistent=False, runtime_readback_verified=False, writes=[])
     if not cfg["enabled"]:
         return report
+    from .motors import HardwareError
+    from pid_tuner.device import SerialDevice
+
     if not motors._opened or motors._moving:
         raise HardwareError("task_pid_requires_idle_open_ports")
     if len(motors.motors) != 2 or {m["name"] for m in motors.motors} != {"upper", "lower"}:

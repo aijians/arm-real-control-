@@ -16,6 +16,8 @@ bash run_pid_tuner.sh --axis both --real --pause-sal --host 0.0.0.0 --port 8765
 
 `hardware.task_start_pid.enabled=true`：每份TXT成功解析后、相机及运动任务开始前，在主任务锁和两轴独占串口内先停止并确认双轴停稳，再通过0x42依次写角度/速度环。大臂角度50/15/0、速度650/50/0；小臂角度50/0/0、速度500/30/0（均Kp/Ki/Kd）。同一常驻程序接收下一份任务时会重新写入，阶段重试和往返中的每段运动不重复写。空闲启动或没有有效任务时不打开串口、不写PID。
 
+在 `config/robot.json` 的 `hardware.task_start_pid` 中选择 `"enabled": true`（加载配置中的四环PID）或 `"enabled": false`（跳过PID初始化）。关闭时不加载PID写入设备、不执行PID初始化停机或写入，日志显示 `PID RAM initialization disabled; keeping drive PID`，结果记录 `pid_initialization.status="disabled"`、`writes=[]`；相机和正常任务继续运行。省略整个 `task_start_pid` 也默认关闭。关闭只保留驱动当前PID，不会清空PID、恢复旧参数或恢复出厂值。修改配置后重新启动 `run.sh` 生效；当前仍保持开启和上述数值。
+
 每条写入要求正确电机ID、0x42、参数ID与成功状态应答，超时/拒绝/异常立即中止任务并尝试双轴停止，保留部分写入记录，不自动回写无法确认的旧RAM值。四条全部成功才启动相机和TaskRunner；不保存ROM、不改电流环/输出限制、不使能或改变零点。`result.json.pid_initialization`记录请求值、逐条报文/应答与停止确认。`acknowledged`只表示写入应答，不冒充运行RAM独立读回或已解决全部欠角。现有0x14整组设置不能用于判定这次RAM写入是否生效。
 
 ## Free / Push 多圈绝对位置定时基线（2026-11-10）

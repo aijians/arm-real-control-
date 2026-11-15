@@ -45,7 +45,10 @@ def main():
                 pid_report = {"status": "not_started"}
                 try:
                     with MotorPair(config["hardware"]) as motors:
-                        print(f"[task {task_id}] PID RAM initializing", flush=True)
+                        pid_enabled = config["hardware"].get("task_start_pid", {}).get("enabled", False)
+                        pid_message = ("PID RAM initializing" if pid_enabled else
+                                       "PID RAM initialization disabled; keeping drive PID")
+                        print(f"[task {task_id}] {pid_message}", flush=True)
                         initialize_task_pid(motors, config["hardware"], pid_report)
                         print(f"[task {task_id}] camera starting", flush=True)
                         vision.start(task_id)
