@@ -79,6 +79,21 @@ class CameraExtrinsicsTests(unittest.TestCase):
         self.assertEqual(ground['R_world_from_camera'], DEFAULT_REAL_CALIBRATION['R_world_from_camera'])
         self.assertTrue(DEFAULT_REAL_CALIBRATION['is_approximate'])
 
+    def test_fitted_ground_rail_keeps_measured_optical_centre(self):
+        # Real fitted rail metadata previously silently replaced measured Cx/Cy.
+        for profile in ('ground', 'real'):
+            with self.subTest(profile=profile):
+                payload, points, edges = real_payload()
+                payload['profile'] = profile
+                payload['rail_line'] = {'source': 'fitted', 'k': .382425, 'm': 139.018}
+                result = convert_detections(payload)
+                for color, expected in points.items():
+                    np.testing.assert_allclose(result['sliders'][color]['world_xyz_mm'],
+                                               expected, atol=1e-8, rtol=0)
+                for side, expected in zip(('left', 'right'), edges):
+                    np.testing.assert_allclose(result['rail_endpoints'][side]['world_xyz_mm'],
+                                               expected, atol=1e-8, rtol=0)
+
     def test_explicit_upright_calibration_is_used_without_another_rotation(self):
         calibration = copy.deepcopy(DEFAULT_REAL_CALIBRATION)
         calibration['C_world_mm'][2] = -105.

@@ -10,7 +10,7 @@
      * 导轨滑杆轴心平面 plane_y_mm = 183.5 mm（底座 Y=28.5 mm + 155.0 mm）
      * 导轨前挡边表面平面 rail_lip_y_mm = 174.5 mm（左、右导轨端点统一按同一前挡边平面求交）
      * 当检测结果包含实测拟合导轨线 rail_line (source='fitted') 时，自动根据导轨透视斜率与高度区间
-       补偿在轨相机与重装地面相机的实际安装姿态角（Roll/Yaw）及镜头入瞳偏移，消除越界误报与尺度拉伸。
+       按现有分支补偿安装姿态角（Roll/Yaw）；光心保持用户指定的 [24.5, 99.0, -108.0] mm。
 """
 
 import argparse
@@ -97,7 +97,7 @@ def _rot_z(deg):
 
 
 def _refine_pose_for_rail_line(config, rail_line):
-    """根据实测拟合导轨线 (k, m) 补偿在轨相机与重装地面相机的安装姿态角及入瞳偏移。"""
+    """根据实测导轨线补偿安装姿态角，保持标定中的光心坐标。"""
     if not isinstance(rail_line, dict) or rail_line.get("source") != "fitted":
         return config
     try:
@@ -114,17 +114,11 @@ def _refine_pose_for_rail_line(config, rail_line):
             if (y_mid <= 420.0 or k >= 0.30) and config.get("pixel_coordinate_frame") == "sensor_raw"
             else copy.deepcopy(config))
     R0 = np.asarray(base["R_world_from_camera"], dtype=float)
-    C0 = np.asarray(base["C_world_mm"], dtype=float).copy()
 
     if k >= 0.50 or y_mid < 275.0:
-        # 在轨 (real) 相机安装姿态补偿：绕世界 X 轴滚转 -22.415°、绕世界 Z 轴偏航 -2.475°
+        # 在轨 (real) 相机安装姿态补偿：绕世界 X 轴滚转 -22.55°、绕世界 Z 轴偏航 -2.545°
         R_corr = _rot_z(-2.545) @ _rot_x(-22.55)
         base["R_world_from_camera"] = (R_corr @ R0).tolist()
-    elif k >= 0.30 or y_mid <= 420.0:
-        # 重装后倒装地面相机入瞳位置补偿（镜头入瞳位于前顶点后方约 1.42 mm、左侧偏移 4.60 mm）
-        C0[0] = 18.80
-        C0[1] = 97.85
-        base["C_world_mm"] = C0.tolist()
     return base
 
 
