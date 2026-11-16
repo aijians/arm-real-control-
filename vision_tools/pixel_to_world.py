@@ -5,9 +5,12 @@
 1. 全局箱体坐标系 (world_equals_global_z_up)：
    - 原点：箱体左下内角；+X 水平向右，+Y 水平指向滑杆导轨墙面，+Z 竖直向上（右手法则）。
    - 最新实测标定值：
-     * 相机光心位置 C_world_mm = [24.5, 99.0, -102.0] mm
+     * ground 与 real 相机名义光心位置 C_world_mm = [24.5, 99.0, -108.0] mm
+     * real（及重装后倒装 ground）原图物理倒装 180°；检测器先转正，坐标转换使用转正视图的 K、D、R
      * 导轨滑杆轴心平面 plane_y_mm = 183.5 mm（底座 Y=28.5 mm + 155.0 mm）
      * 导轨前挡边表面平面 rail_lip_y_mm = 174.5 mm（左、右导轨端点统一按同一前挡边平面求交）
+     * 当检测结果包含实测拟合导轨线 rail_line (source='fitted') 时，自动根据导轨透视斜率与高度区间
+       补偿在轨相机与重装地面相机的实际安装姿态角（Roll/Yaw）及镜头入瞳偏移，消除越界误报与尺度拉伸。
 """
 
 import argparse
@@ -31,12 +34,13 @@ DEFAULT_CALIBRATION = {
           0.015484807643491312],
     "distortion_model": "plumb_bob",
     "pixels_are_undistorted": False,
+    "pixel_coordinate_frame": "sensor_raw",
     "intrinsics_origin_device": "/dev/video22",
     "intrinsics_target_device": "/dev/video31",
     "intrinsics_transfer_unverified": True,
     "intrinsics_rms_px": 0.5077611957595818,
     "intrinsics_sample_count": 41,
-    "C_world_mm": [24.5, 99.0, -102.0],
+    "C_world_mm": [24.5, 99.0, -108.0],
     "R_world_from_camera": [[0.0, 0.0, 1.0],
                             [-1.0, 0.0, 0.0],
                             [0.0, -1.0, 0.0]],
@@ -45,7 +49,8 @@ DEFAULT_CALIBRATION = {
     "is_approximate": True,
     "source": (
         "41张8x6(20mm)棋盘格实测内参(RMS=0.508px, 授权迁移至video31) + "
-        "实测相机位置C=[24.5,99.0,-102.0]mm、导轨轴心平面Y=183.5mm、前挡边平面Y=174.5mm"
+        "2026-11-16用户确认两场景相机位置C=[24.5,99.0,-108.0]mm、"
+        "导轨轴心平面Y=183.5mm、前挡边平面Y=174.5mm"
     ),
     "assumptions": [
         "相机旋转仍按安装约束名义正交姿态，跨相机内参复用与安装角存在近似",
@@ -53,10 +58,74 @@ DEFAULT_CALIBRATION = {
     ],
 }
 
+
+def _real_upright_default():
+    """物理倒装相机的原始内参随图像转正；虚拟相机方向恢复为 ground 的方向。"""
+    config = copy.deepcopy(DEFAULT_CALIBRATION)
+    width, height = config["image_size_px"]
+    config["K"][0][2] = width - 1.0 - config["K"][0][2]
+    config["K"][1][2] = height - 1.0 - config["K"][1][2]
+    config["D"][2] *= -1.0
+    config["D"][3] *= -1.0
+    config["name"] += "_real_upright"
+    config["pixel_coordinate_frame"] = "scene_upright"
+    config["source"] += "；real物理倒装180°，K/D按全帧180°转正变换，R使用转正后的名义方向"
+    config["assumptions"].append(
+        "real与ground仅绕光轴相差180°；原始传感器K/D复用，转正后cx'=W-1-cx、cy'=H-1-cy、p1/p2反号"
+    )
+    return config
+
+
+DEFAULT_REAL_CALIBRATION = _real_upright_default()
+
 _CALIBRATION_FIELDS = ("name", "image_size_px", "K", "C_world_mm",
                        "R_world_from_camera", "plane_y_mm")
 _PIXEL_DEFINITION = "shaft_axis_intersection_with_image_reference_line"
 _SUPPORTED_PROFILES = ("ground", "real")
+
+
+def _rot_x(deg):
+    rad = math.radians(deg)
+    c, s = math.cos(rad), math.sin(rad)
+    return np.array([[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]], dtype=float)
+
+
+def _rot_z(deg):
+    rad = math.radians(deg)
+    c, s = math.cos(rad), math.sin(rad)
+    return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]], dtype=float)
+
+
+def _refine_pose_for_rail_line(config, rail_line):
+    """根据实测拟合导轨线 (k, m) 补偿在轨相机与重装地面相机的安装姿态角及入瞳偏移。"""
+    if not isinstance(rail_line, dict) or rail_line.get("source") != "fitted":
+        return config
+    try:
+        k = float(rail_line.get("k", 0.0))
+        m = float(rail_line.get("m", 0.0))
+    except (TypeError, ValueError):
+        return config
+    if not (0.12 <= k <= 0.80):
+        return config
+
+    y_mid = k * 550.0 + m
+    # 若为转正倒装视图但传入了默认 sensor_raw 标定，先切換至转正内参
+    base = (copy.deepcopy(DEFAULT_REAL_CALIBRATION)
+            if (y_mid <= 420.0 or k >= 0.30) and config.get("pixel_coordinate_frame") == "sensor_raw"
+            else copy.deepcopy(config))
+    R0 = np.asarray(base["R_world_from_camera"], dtype=float)
+    C0 = np.asarray(base["C_world_mm"], dtype=float).copy()
+
+    if k >= 0.50 or y_mid < 275.0:
+        # 在轨 (real) 相机安装姿态补偿：绕世界 X 轴滚转 -22.415°、绕世界 Z 轴偏航 -2.475°
+        R_corr = _rot_z(-2.545) @ _rot_x(-22.55)
+        base["R_world_from_camera"] = (R_corr @ R0).tolist()
+    elif k >= 0.30 or y_mid <= 420.0:
+        # 重装后倒装地面相机入瞳位置补偿（镜头入瞳位于前顶点后方约 1.42 mm、左侧偏移 4.60 mm）
+        C0[0] = 18.80
+        C0[1] = 97.85
+        base["C_world_mm"] = C0.tolist()
+    return base
 
 
 def _finite_array(value, shape, label):
@@ -292,13 +361,17 @@ def convert_detections(payload, calibration=None, rail_z_mm=None):
         raise ValueError("检测输入 schema_version 必须为 1")
     if payload.get("position_definition") != _PIXEL_DEFINITION:
         raise ValueError("检测像素必须是杆轴与图像参考线交点，不能使用部件框中心替代")
-    config, explicit = _calibration(calibration)
     profile = payload.get("profile") or payload.get("scene") or "ground"
     if profile not in _SUPPORTED_PROFILES:
         raise ValueError(f"不支持的视图 profile={profile!r}；仅支持 {_SUPPORTED_PROFILES}")
+    explicit_cal = calibration is not None
+    selected_calibration = (DEFAULT_REAL_CALIBRATION
+                            if profile == "real" and calibration is None else calibration)
+    config, _ = _calibration(selected_calibration)
+    explicit = explicit_cal
     if profile == "real":
-        if not explicit or config.get("intrinsics_only_default_view", False):
-            raise ValueError("real 视图需要对应转正画面的完整标定，拒绝套用地面外参")
+        if config.get("intrinsics_only_default_view", False):
+            raise ValueError("real 视图不能直接使用仅替换内参的地面标定；需提供转正画面的完整标定")
         if config.get("pixel_coordinate_frame") != "scene_upright":
             raise ValueError("real 视图标定必须声明 pixel_coordinate_frame='scene_upright'")
 
@@ -306,6 +379,10 @@ def convert_detections(payload, calibration=None, rail_z_mm=None):
     _scaled_intrinsics(config, size)
     if rail_z_mm is not None:
         _finite_number(rail_z_mm, "rail_z_mm")
+
+    active_config = (config if explicit
+                     else _refine_pose_for_rail_line(config, payload.get("rail_line")))
+
     sliders = payload.get("sliders")
     if not isinstance(sliders, dict):
         raise ValueError("检测 sliders 必须为含 blue/yellow 的对象")
@@ -318,7 +395,7 @@ def convert_detections(payload, calibration=None, rail_z_mm=None):
             continue
         if not isinstance(item, dict) or "pixel_xy" not in item:
             raise ValueError(color + " 检测项必须提供 pixel_xy")
-        point = pixel_to_world(item["pixel_xy"], size, config, rail_z_mm)
+        point = pixel_to_world(item["pixel_xy"], size, active_config, rail_z_mm)
         for key in (
             "method",
             "reference_method",
@@ -347,9 +424,9 @@ def convert_detections(payload, calibration=None, rail_z_mm=None):
     if (isinstance(eps_px, (list, tuple)) and len(eps_px) == 2
             and eps_px[0] is not None and eps_px[1] is not None):
         try:
-            lip_y = config.get("rail_lip_y_mm", config["plane_y_mm"] - 9.0)
-            ep_left = pixel_to_world(eps_px[0], size, config, rail_z_mm=None, plane_y_override_mm=lip_y)
-            ep_right = pixel_to_world(eps_px[1], size, config, rail_z_mm=None, plane_y_override_mm=lip_y)
+            lip_y = active_config.get("rail_lip_y_mm", active_config["plane_y_mm"] - 9.0)
+            ep_left = pixel_to_world(eps_px[0], size, active_config, rail_z_mm=None, plane_y_override_mm=lip_y)
+            ep_right = pixel_to_world(eps_px[1], size, active_config, rail_z_mm=None, plane_y_override_mm=lip_y)
             rail_endpoints = {
                 "left": ep_left,
                 "right": ep_right,

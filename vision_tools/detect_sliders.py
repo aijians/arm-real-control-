@@ -2,18 +2,18 @@
 """蓝色滑杆与橙色(黄色)滑杆像素位置及导轨真实端点识别脚本（支持 ground 与 real 场景）。
 
 核心算法与工程修复说明：
-1. 先掩膜屏蔽滑杆、再拟合外侧前挡边下沿直线（修复初始姿态斜率 0.333 偏斜问题）：
-   - 先提取蓝、橙滑杆颜色掩膜并做形态学膨胀，在拟合导轨直线时彻底剔除滑杆遮挡列，
-     防止左端蓝杆轴环与右端黄杆方块把导轨直线斜率拉偏；
-   - 在未遮挡列中自上而下寻找第一个（最上层）“无色差灰白前挡边 -> 暗槽”的垂直梯度峰值（Peak 1），
-     严格锁定贯通全长的外侧前挡边下沿，避免误锁低 13~15 px 的槽内后壁反光台阶（Peak 2）；
-   - 引入基于相机-导轨刚性安装约束的斜率一致性护栏（|k - k_nom| <= max_slope_deviation），
-     当遮挡导致有效跨度较短或斜率异常时自动约束斜率并稳健重估截距 m；若有效点不足则返回 None。
+1. 滑块上下分界锚点引导 + Peak 1 / 最强峰搜索 + 共线 RANSAC 拟合导轨前挡边线（修复新地面与在轨多结构混入问题）：
+   - 先提取蓝、橙滑杆颜色掩膜，并以蓝色滑杆位置作为空间参考过滤背景黄胶带干扰；
+   - 利用每个滑杆“上方圆柱杆 + 下方方形滑块”被白色导轨前挡边自然切开（或缩颈）的几何结构，
+     提取导轨前挡边穿过滑杆处的高度锚点 (x_anchor, y_lip_anchor)；
+   - 在锚点约束的合法斜率走廊 [0.15, 0.72] 内：对地面视角（y_anchor >= 295 px）自上而下寻找第一个
+     “无色差明亮前挡边 -> 暗槽”垂直梯度峰值（Peak 1），彻底排除左下方支架底边（v≈450）、槽内后壁台阶
+     与右上方背景强反光（v≈140..200）；对在轨仰视视角（y_anchor < 295 px）提取走廊内最强前挡边梯度峰；
+   - 对候选边缘点执行共线 RANSAC（内点阈值 2.5 px）与 Huber 加权最小二乘精化，杜绝孤立异物边缘拉偏斜率。
 2. 一维剖面水平平滑与物理端点校验（_detect_rail_endpoints）：
-   - 使用 (7, 1) 高斯核沿一维剖面水平长度方向平滑；
-   - 校验边缘下方确实进入暗槽/滑杆区（排除左侧 x < 446 实心灰色三角斜撑水平面）；
-   - 恢复 ROI 截断边界检查（idx_l == 0 或 idx_r == len - 1 时返回 None）与最小有效段长度检查，
-     绝不以先验扫描边界冒充实测物理端点。
+   - 在一维边缘剖面中融合“明亮无色差挡边 -> 暗槽”与“明亮无色差挡边 -> 高饱和度彩色滑块”两类过渡，
+     防止亮橙色滑块位于导轨右端时截断导轨端点剖面；
+   - 保留 ROI 截断边界检查与最小有效段长度检查。
 """
 
 import argparse
@@ -29,22 +29,21 @@ SCENES = {
     "ground": {
         "canonical_size": (1920, 1080),
         "rotation_deg": 0,
-        "roi": (260, 310, 690, 620),
-        "rail_x_range": (445, 672),
+        "roi": (260, 65, 700, 620),
+        "rail_x_range": (445, 680),
         "rail_nominal": (465.0, 458.0, 0.225),
         "rail_band_px": 26,
         "max_slope_deviation": 0.025,
         "lip_split_half_width": 6,
         "endpoint_edge_thresh": 28.0,
-        "min_endpoint_span_px": 180,
+        "min_endpoint_span_px": 150,
         # 杆轴测量带：导轨前挡边线以上 d1..d2 px（避开轴环/挡边，及机械臂从上方遮挡的部分）
         "rod_band_px": (20, 70),
         # 两杆在导轨上的先后顺序不变，相机侧前后遮挡关系也固定：蓝杆在前
         "front_color": "blue",
         "occlusion_gap_px": 8,
         "min_rod_rows": 8,
-        # 杆宽模型 w(u)=a+b*u（像素，u 为杆轴像素 x）。2026-11-15 由 8ddc48b7/01f43e83/a63369c4
-        # 三段地面录像经 eval_slider_detection.py calibrate-width（位置区间上分位数+RANSAC）拟合。
+        # 杆宽模型 w(u)=a+b*u（像素，u 为杆轴像素 x）
         "width_model_px": {"blue": (119.438, -0.14111), "yellow": (144.583, -0.17082)},
         "width_tolerance_ratio": 0.2,
         "min_visible_width_ratio": 0.5,
@@ -52,7 +51,7 @@ SCENES = {
     "real": {
         "canonical_size": (1920, 1080),
         "rotation_deg": 180,
-        "roi": (420, 80, 700, 365),
+        "roi": (380, 65, 700, 520),
         "rail_x_range": (465, 680),
         "rail_nominal": (480.0, 168.0, 0.650),
         "rail_band_px": 30,
@@ -64,7 +63,6 @@ SCENES = {
         "front_color": "blue",
         "occlusion_gap_px": 8,
         "min_rod_rows": 8,
-        # 2026-11-15 由在轨 init.mp4/pushed_to_right.mp4 拟合（同上方法）。
         "width_model_px": {"blue": (124.743, -0.14575), "yellow": (134.459, -0.1571)},
         "width_tolerance_ratio": 0.2,
         "min_visible_width_ratio": 0.65,
@@ -108,7 +106,7 @@ def _build_color_masks(patch):
 
     orange_mask = (
         (hsv[:, :, 0] >= 3) & (hsv[:, :, 0] <= 38) &
-        (hsv[:, :, 1] >= 38) & (hsv[:, :, 2] >= 85) &
+        (hsv[:, :, 1] >= 38) & (hsv[:, :, 2] >= 125) &
         ((r - b) >= 35) & ((g - b) >= 12) &
         (lab[:, :, 2] >= 136)
     ).astype(np.uint8) * 255
@@ -120,8 +118,70 @@ def _build_color_masks(patch):
     return {"blue": blue_mask, "orange": orange_mask}
 
 
+def _estimate_slider_split_anchors(masks, x1, y1):
+    """提取蓝、橙滑杆被导轨前挡边切分（或缩颈）处的高度锚点 (x_center, y_lip_est)。"""
+    anchors = []
+    blue_ref_y = None
+    blue_ref_x = None
+    for c_key in ("blue", "orange"):
+        mask = masks[c_key]
+        num, _, stats, _ = cv2.connectedComponentsWithStats(mask)
+        comps = []
+        for i in range(1, num):
+            bx, by, bw, bh, area = stats[i]
+            if area < 110 or min(bw, bh) < 5:
+                continue
+            gx1, gy1, gx2, gy2 = bx + x1, by + y1, bx + x1 + bw, by + y1 + bh
+            if gx2 < 380 or gx1 > 700:
+                continue
+            if c_key == "orange" and blue_ref_y is not None:
+                yc = 0.5 * (gy1 + gy2)
+                xc = 0.5 * (gx1 + gx2)
+                if xc < blue_ref_x - 20.0 or not (blue_ref_y - 120.0 <= yc <= blue_ref_y + 180.0):
+                    continue
+            comps.append((area, gx1, gy1, gx2, gy2, i))
+        if not comps:
+            continue
+        comps.sort(reverse=True)
+        seed = comps[0]
+        sx1, sy1, sx2, sy2 = seed[1], seed[2], seed[3], seed[4]
+        cluster = [seed]
+        for c in comps[1:]:
+            cx1, cy1, cx2, cy2 = c[1], c[2], c[3], c[4]
+            h_ov = min(sx2, cx2) - max(sx1, cx1)
+            if h_ov >= 0.25 * min(sx2 - sx1, cx2 - cx1) and abs(0.5 * (cy1 + cy2) - 0.5 * (sy1 + sy2)) <= 165.0:
+                cluster.append(c)
+        total_top = min(c[2] for c in cluster)
+        total_bot = max(c[4] for c in cluster)
+        xc = 0.5 * (seed[1] + seed[3])
+        if len(cluster) >= 2:
+            cluster.sort(key=lambda c: c[2])
+            upper = cluster[0]
+            lower = cluster[-1]
+            if lower[2] >= upper[4] - 12 and (lower[4] - upper[2]) >= 75:
+                xc = 0.5 * (max(upper[1], lower[1]) + min(upper[3], lower[3]))
+                y_lip = float(lower[2] - 2.0)
+                anchors.append((float(xc), y_lip))
+                if c_key == "blue":
+                    blue_ref_y, blue_ref_x = y_lip, xc
+                continue
+        if total_bot - total_top >= 135:
+            sub_m = mask[int(total_top - y1) : int(total_bot - y1), int(sx1 - x1) : int(sx2 - x1)]
+            h_sub = sub_m.shape[0]
+            r_start, r_end = int(0.35 * h_sub), int(0.75 * h_sub)
+            row_counts = (sub_m[r_start:r_end] > 0).sum(axis=1)
+            pinch_row = r_start + int(np.argmin(row_counts))
+            y_lip = float(total_top + pinch_row + 4.0)
+        else:
+            y_lip = float(total_bot + 1.0)
+        anchors.append((float(xc), y_lip))
+        if c_key == "blue":
+            blue_ref_y, blue_ref_x = y_lip, xc
+    return anchors
+
+
 def _detect_rail_line(work_img, cfg, masks=None):
-    """在剔除滑杆遮挡后的导轨走廊内提取外侧前挡边下沿直线 y = k * x + m；失败返回 (None, None)。"""
+    """在滑块分界锚点约束的导轨走廊内提取外侧前挡边下沿直线 y = k * x + m；失败返回 (None, None)。"""
     gray = cv2.cvtColor(work_img, cv2.COLOR_BGR2GRAY).astype(np.float32)
     gray_smooth = cv2.GaussianBlur(gray, (9, 5), 2.0, 1.0)
     dy = cv2.Sobel(gray_smooth, cv2.CV_32F, 0, 1, ksize=3)
@@ -132,29 +192,50 @@ def _detect_rail_line(work_img, cfg, masks=None):
         masks = _build_color_masks(work_img[y1:y2, x1:x2])
     slider_occ = cv2.dilate(masks["blue"] | masks["orange"], np.ones((19, 19), np.uint8))
 
-    x_start, x_end = cfg["rail_x_range"]
+    anchors = _estimate_slider_split_anchors(masks, x1, y1)
     x0, y0, k_nom = cfg["rail_nominal"]
     half_band = cfg["rail_band_px"]
     h = work_img.shape[0]
-    is_ground = (cfg.get("rotation_deg", 0) == 0 and y0 > 350)
+    k_min, k_max = 0.15, 0.72
+
+    # 判断是否为地面俯视槽视角（y_anchor >= 295 px）或在轨仰视底面视角（y_anchor < 295 px）
+    mean_anchor_y = float(np.mean([ya for _, ya in anchors])) if anchors else y0
+    is_ground_view = mean_anchor_y >= 295.0
+    x_start, x_end = (445, 680) if is_ground_view else (465, 680)
 
     xs, ys, weights = [], [], []
     for x in range(x_start, x_end):
-        yn = y0 + k_nom * (x - x0)
-        by1 = max(8, int(round(yn - half_band)))
-        by2 = min(h - 8, int(round(yn + half_band)))
-        col_edge = -dy[by1:by2, x]
-        if len(col_edge) < 3:
+        if is_ground_view and anchors:
+            lows, highs = [], []
+            for xa, ya in anchors:
+                dx = x - xa
+                if dx >= 0:
+                    lows.append(ya + k_min * dx - 22.0)
+                    highs.append(ya + k_max * dx + 22.0)
+                else:
+                    lows.append(ya + k_max * dx - 22.0)
+                    highs.append(ya + k_min * dx + 22.0)
+            by1 = max(12, int(round(max(lows))))
+            by2 = min(h - 12, int(round(min(highs))))
+        else:
+            # 在轨视角使用 real 名义走廊 (480, 168, 0.650) ± 30 px
+            rx0, ry0, rkn = (480.0, 168.0, 0.650) if not is_ground_view else (x0, y0, k_nom)
+            rband = 30 if not is_ground_view else half_band
+            yn = ry0 + rkn * (x - rx0)
+            by1 = max(8, int(round(yn - rband)))
+            by2 = min(h - 8, int(round(yn + rband)))
+
+        if by2 - by1 < 3:
             continue
 
+        col_edge = -dy[by1:by2, x]
         chosen_idx = None
         chosen_strength = 0.0
-        if is_ground:
-            # 自上而下寻找第一个“无色差明亮前挡边 -> 暗槽”梯度峰值（外侧前挡边下沿 Peak 1），
-            # 避免跳到下方 13~15 px 的槽内后壁反光台阶（Peak 2）或滑杆边缘。
+        if is_ground_view:
+            # 地面视角：自上而下寻找走廊内第一个“无色差明亮前挡边 -> 暗槽”梯度峰值（Peak 1）
             for idx in range(1, len(col_edge) - 1):
                 strength = float(col_edge[idx])
-                if strength < 28.0 or strength < col_edge[idx - 1] or strength < col_edge[idx + 1]:
+                if strength < 25.0 or strength < col_edge[idx - 1] or strength < col_edge[idx + 1]:
                     continue
                 yg = by1 + idx
                 if y1 <= yg < y2 and x1 <= x < x2 and slider_occ[yg - y1, x - x1] > 0:
@@ -163,14 +244,16 @@ def _detect_rail_line(work_img, cfg, masks=None):
                 below_g = gray_smooth[yg + 1 : yg + 6, x]
                 above_c = chroma[yg - 7 : yg, x]
                 if (len(above_g) > 0 and len(below_g) > 0
-                        and float(np.mean(above_g)) >= 135.0
-                        and float(np.min(above_g)) >= 110.0
-                        and float(np.mean(above_g)) - float(np.min(below_g)) >= 30.0
-                        and float(np.mean(above_c)) <= 45.0):
+                        and float(np.mean(above_g)) >= 125.0
+                        and float(np.min(above_g)) >= 100.0
+                        and float(np.mean(above_g)) - float(np.min(below_g)) >= 25.0
+                        and float(np.min(below_g)) <= 145.0
+                        and float(np.mean(above_c)) <= 48.0):
                     chosen_idx = idx
                     chosen_strength = strength
                     break
         else:
+            # 在轨视角：选取未遮挡列中的最强前挡边下沿梯度峰
             for idx in np.argsort(col_edge)[::-1]:
                 idx = int(idx)
                 strength = float(col_edge[idx])
@@ -201,16 +284,57 @@ def _detect_rail_line(work_img, cfg, masks=None):
     ys_arr = np.asarray(ys, dtype=np.float64)
     w_arr = np.asarray(weights, dtype=np.float64)
 
-    k, m = np.polyfit(xs_arr, ys_arr, 1, w=w_arr)
-    for _ in range(5):
-        residual = np.abs(ys_arr - (k * xs_arr + m))
-        w_robust = w_arr / np.maximum(1.0, residual / 1.5)
-        k, m = np.polyfit(xs_arr, ys_arr, 1, w=w_robust)
+    if is_ground_view:
+        # 共线 RANSAC 筛选同一条实体前挡边上的内点，彻底剔除残余异物边缘点
+        best_inliers = None
+        best_score = -1.0
+        n = len(xs_arr)
+        for i in range(n):
+            for j in range(i + 1, n):
+                dx = xs_arr[j] - xs_arr[i]
+                if abs(dx) < 25.0:
+                    continue
+                k_c = (ys_arr[j] - ys_arr[i]) / dx
+                if not (k_min <= k_c <= k_max):
+                    continue
+                m_c = ys_arr[i] - k_c * xs_arr[i]
+                resid = np.abs(ys_arr - (k_c * xs_arr + m_c))
+                inliers = resid <= 2.5
+                if np.count_nonzero(inliers) < 12:
+                    continue
+                score = float(w_arr[inliers].sum())
+                if score > best_score:
+                    best_score = score
+                    best_inliers = inliers
 
-    max_k_dev = float(cfg.get("max_slope_deviation", 0.025))
-    if abs(k - k_nom) > max_k_dev or (xs_arr.max() - xs_arr.min()) < 70.0:
-        k = float(np.clip(k, k_nom - max_k_dev, k_nom + max_k_dev))
-        m = float(np.median(ys_arr - k * xs_arr))
+        if best_inliers is None:
+            return None, None
+        xs_in = xs_arr[best_inliers]
+        ys_in = ys_arr[best_inliers]
+        w_in = w_arr[best_inliers]
+    else:
+        xs_in, ys_in, w_in = xs_arr, ys_arr, w_arr
+
+    k, m = np.polyfit(xs_in, ys_in, 1, w=w_in)
+    for _ in range(5):
+        residual = np.abs(ys_in - (k * xs_in + m))
+        w_robust = w_in / np.maximum(1.0, residual / 1.5)
+        k, m = np.polyfit(xs_in, ys_in, 1, w=w_robust)
+
+    if not is_ground_view:
+        k_real_nom = 0.650
+        max_k_dev = 0.045
+        if abs(k - k_real_nom) > max_k_dev or (xs_in.max() - xs_in.min()) < 70.0:
+            k = float(np.clip(k, k_real_nom - max_k_dev, k_real_nom + max_k_dev))
+            m = float(np.median(ys_in - k * xs_in))
+    elif mean_anchor_y >= 420.0:
+        max_k_dev = float(cfg.get("max_slope_deviation", 0.025))
+        if abs(k - k_nom) > max_k_dev or (xs_in.max() - xs_in.min()) < 70.0:
+            k = float(np.clip(k, k_nom - max_k_dev, k_nom + max_k_dev))
+            m = float(np.median(ys_in - k * xs_in))
+
+    if not (k_min <= k <= k_max):
+        return None, None
 
     return float(k), float(m)
 
@@ -223,6 +347,7 @@ def _detect_rail_endpoints(work_img, k, m, cfg):
     gray = cv2.cvtColor(work_img, cv2.COLOR_BGR2GRAY).astype(np.float32)
     gray_smooth = cv2.GaussianBlur(gray, (9, 5), 2.0, 1.0)
     neg_dy = -cv2.Sobel(gray_smooth, cv2.CV_32F, 0, 1, ksize=3)
+    chroma = work_img.max(axis=2).astype(np.float32) - work_img.min(axis=2).astype(np.float32)
 
     x1, _, x2, _ = cfg["roi"]
     h = work_img.shape[0]
@@ -236,13 +361,13 @@ def _detect_rail_endpoints(work_img, k, m, cfg):
             col = neg_dy[by1:by2, x]
             idx = int(np.argmax(col))
             ypeak = by1 + idx
-            # 要求边沿下方确实比上方前挡边暗（过滤左侧实心灰色三角斜撑台面）
             above_med = float(np.median(gray_smooth[ypeak - 6 : ypeak - 1, x]))
             below_med = float(np.median(gray_smooth[ypeak + 3 : ypeak + 10, x]))
-            if above_med - below_med >= 15.0:
-                e_prof[i] = float(col[idx])
+            below_chr = float(np.median(chroma[ypeak + 3 : ypeak + 12, x]))
+            # 要求边沿下方进入暗槽，或进入高色度滑块区（防止亮橙色滑块截断右端点）
+            if above_med - below_med >= 15.0 or (above_med >= 130.0 and below_chr >= 45.0):
+                e_prof[i] = max(float(col[idx]), 32.0 if below_chr >= 45.0 else 0.0)
 
-    # OpenCV GaussianBlur 的 ksize=(width, height)：(7, 1) 表示沿 1xN 剖面的水平长度方向平滑
     e_smooth = cv2.GaussianBlur(e_prof.reshape(1, -1), (7, 1), 1.5).ravel()
     thresh = float(cfg.get("endpoint_edge_thresh", 28.0))
     active = (e_smooth >= thresh).astype(np.uint8)
@@ -267,7 +392,6 @@ def _detect_rail_endpoints(work_img, k, m, cfg):
         return None
 
     idx_l, idx_r = int(best_seg[0]), int(best_seg[-1])
-    # 防止 ROI 截断边界被当成物理端点
     if idx_l <= 0 or idx_r >= len(xs) - 1:
         return None
 
@@ -359,11 +483,7 @@ def _compute_rod_axis_x(rod, offset_x):
 
 
 def _rod_band_rows(rod, offset_xy, k, m, band, roi_width):
-    """返回测量带内每行杆轮廓 (y, 左边缘, 右边缘, 是否触及ROI左/右边界)，像素为全图坐标。
-
-    测量带按“导轨前挡边线以上 d1..d2 像素”取固定行，不随部件框高度变化，
-    因此机械臂从上方遮挡杆顶、或导轨支架遮挡杆底时，所用行区间保持一致。
-    """
+    """返回测量带内每行杆轮廓 (y, 左边缘, 右边缘, 是否触及ROI左/右边界)，像素为全图坐标。"""
     x1, y1 = offset_xy
     bx, by, bw, bh = rod["local_bbox"]
     d1, d2 = band
@@ -401,12 +521,7 @@ def _width_model(cfg, out_key, u):
 
 
 def _measure_rod(rows, out_key, cfg, near_side_occluded=None):
-    """由测量带内逐行轮廓求杆轴像素 x，并给出可靠性判断。
-
-    - 两侧边缘都可见：各行中点的截尾均值（与原逐行中点法一致，改为固定测量带）。
-    - 前杆紧邻后杆一侧（near_side_occluded='left'/'right'）：该侧边缘被前杆遮挡，
-      改用未被遮挡的远侧边缘减去半个模型杆宽。
-    """
+    """由测量带内逐行轮廓求杆轴像素 x，并给出可靠性判断。"""
     min_rows = int(cfg.get("min_rod_rows", 8))
     tol = float(cfg.get("width_tolerance_ratio", 0.2))
     reasons = []
@@ -436,7 +551,6 @@ def _measure_rod(rows, out_key, cfg, near_side_occluded=None):
             reasons.append("rod_width_inconsistent_with_model")
         return mid, reliable, reasons, info
 
-    # 近侧被前杆遮挡：只用远侧边缘。宽度模型依赖杆轴位置，迭代即可收敛。
     far = _trimmed_mean(rights if near_side_occluded == "left" else lefts)
     sign = -1.0 if near_side_occluded == "left" else 1.0
     axis = far + sign * 0.5 * (width - 1.0)
@@ -452,12 +566,9 @@ def _measure_rod(rows, out_key, cfg, near_side_occluded=None):
         return axis, False, reasons, info
     info["width_model_px"] = round(model, 2)
     reliable = True
-    # 可见宽度不可能明显大于整杆宽度；若大于则说明遮挡判断或分割有误。
     if width > model * (1.0 + tol):
         reliable = False
         reasons.append("rod_width_inconsistent_with_model")
-    # 仅被前杆遮挡时可见比例基本恒定（地面约 0.63、在轨约 0.74）；明显更窄说明远侧边缘
-    # 也被其它物体（如机械臂）遮挡，远侧边缘不可信。
     min_ratio = float(cfg.get("min_visible_width_ratio", 0.5))
     if width < model * min_ratio:
         reliable = False
@@ -475,9 +586,9 @@ def _near_side_contact(back_rows, front_rows, gap_px):
         f = front.get(r[0])
         if f is None:
             continue
-        if f[1] < r[1]:          # 前杆在左：前杆右边缘到后杆左边缘
+        if f[1] < r[1]:
             gaps_left.append(r[1] - f[2])
-        else:                    # 前杆在右：后杆右边缘到前杆左边缘
+        else:
             gaps_right.append(f[1] - r[2])
     if len(gaps_left) >= 3 and np.median(gaps_left) <= gap_px:
         return "left"
@@ -497,6 +608,17 @@ def _map_point(point, canonical_size, original_size):
     ]
 
 
+def _needs_180_rotation(image_1080, roi, already_rotated):
+    """若输入未声明已转正，检查正向 ROI 与倒装对应区域中的蓝色滑杆掩膜，自动兼容倒装原图与正向图。"""
+    if already_rotated:
+        return False
+    x1, y1, x2, y2 = roi
+    up_blue = int(np.count_nonzero(_build_color_masks(image_1080[y1:y2, x1:x2])["blue"]))
+    rot_img = cv2.rotate(image_1080, cv2.ROTATE_180)
+    rot_blue = int(np.count_nonzero(_build_color_masks(rot_img[y1:y2, x1:x2])["blue"]))
+    return rot_blue > up_blue and rot_blue >= 400
+
+
 def detect_frame(image, profile="ground", scene=None, already_rotated=False):
     """识别单帧 BGR 图像中的导轨真实两端点及蓝色、橙(黄)色滑杆坐标。"""
     active_profile = scene if scene is not None else profile
@@ -506,34 +628,41 @@ def detect_frame(image, profile="ground", scene=None, already_rotated=False):
             or image.ndim != 3 or image.shape[2] != 3 or image.size == 0):
         raise ValueError("Frame must be a non-empty uint8 3-channel BGR image")
 
-    cfg = SCENES[active_profile]
-    cw, ch = cfg["canonical_size"]
+    base_cfg = SCENES[active_profile]
+    cw, ch = base_cfg["canonical_size"]
     oh, ow = image.shape[:2]
     if abs(ow * ch - oh * cw) > max(cw, ch):
         raise ValueError(
             f"Image aspect ratio {ow}x{oh} does not match profile {active_profile} ({cw}x{ch}); "
             "use a full-frame proportional resize."
         )
-    rotation = 0 if already_rotated else cfg["rotation_deg"]
 
-    work = cv2.rotate(image, cv2.ROTATE_180) if rotation == 180 else image
-    if (ow, oh) != (cw, ch):
-        work = cv2.resize(work, (cw, ch), interpolation=cv2.INTER_LINEAR)
+    work = cv2.resize(image, (cw, ch), interpolation=cv2.INTER_LINEAR) if (ow, oh) != (cw, ch) else image.copy()
+    if not already_rotated and (base_cfg["rotation_deg"] == 180 or _needs_180_rotation(work, base_cfg["roi"], False)):
+        work = cv2.rotate(work, cv2.ROTATE_180)
 
-    # 1. 先提取 ROI 内的蓝、橙颜色掩膜，用于屏蔽滑杆遮挡后再拟合导轨直线
-    x1, y1, x2, y2 = cfg["roi"]
+    # 1. 提取 ROI 内的蓝、橙颜色掩膜
+    x1, y1, x2, y2 = base_cfg["roi"]
     patch = work[y1:y2, x1:x2]
     masks = _build_color_masks(patch)
 
-    # 2. 剔除滑杆遮挡列，拟合外侧前挡边下沿直线 y = k * x + m。
-    #    该直线是杆轴取交点的图像参考线；拟合失败时回退到场景名义线（安装位置固定）。
-    k, m = _detect_rail_line(work, cfg, masks=masks)
+    # 2. 结合滑块分界锚点、Peak 1 / 最强峰与共线 RANSAC 拟合导轨前挡边下沿直线 y = k * x + m
+    k, m = _detect_rail_line(work, base_cfg, masks=masks)
     rail_line_source = "fitted"
     if k is None or m is None:
-        x0, y0, k_nom = cfg["rail_nominal"]
+        x0, y0, k_nom = base_cfg["rail_nominal"]
         k, m = float(k_nom), float(y0 - k_nom * x0)
         rail_line_source = "nominal_fallback"
-    # 导轨端点仅作诊断输出，不参与行程范围或验收判定（行程范围改用模型固定值）。
+
+    # 根据实测导轨在转正画面中的垂直高度自适应选择高斜率/重装参数或传统正向地面参数
+    y_mid = k * 550.0 + m
+    if y_mid <= 420.0 or k >= 0.30:
+        cfg = dict(SCENES["real"])
+        if y_mid < 275.0:
+            cfg["roi"] = (420, 80, 700, 365)
+    else:
+        cfg = dict(SCENES["ground"])
+
     endpoints = _detect_rail_endpoints(work, k, m, cfg)
     rail_endpoints_px = (
         [_map_point(endpoints[0], (cw, ch), (ow, oh)),
@@ -548,21 +677,27 @@ def detect_frame(image, profile="ground", scene=None, already_rotated=False):
     half_lip = cfg["lip_split_half_width"]
     k_rod_horiz_close = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 3))
     k_block_open = np.ones((7, 7), np.uint8)
-    band = cfg.get("rod_band_px", (20, 70))
+    band = cfg.get("rod_band_px", (40, 80))
 
     parts = {}
+    blue_x_center = None
     for mask_key, out_key in (("blue", "blue"), ("orange", "yellow")):
         mask = masks[mask_key]
         upper_raw = np.where(gy < rail_y_grid - half_lip, mask, 0).astype(np.uint8)
+        upper_raw = np.where(gy >= rail_y_grid - 175.0, upper_raw, 0).astype(np.uint8)
+        if out_key == "yellow" and blue_x_center is not None:
+            upper_raw = np.where(gx >= blue_x_center - 20.0, upper_raw, 0).astype(np.uint8)
         upper_mask = cv2.morphologyEx(upper_raw, cv2.MORPH_CLOSE, k_rod_horiz_close)
-        lower_mask = cv2.morphologyEx(
-            np.where(gy > rail_y_grid + half_lip, mask, 0).astype(np.uint8),
-            cv2.MORPH_OPEN,
-            k_block_open,
-        )
+        lower_raw = np.where((gy > rail_y_grid + half_lip) & (gy <= rail_y_grid + 135.0), mask, 0).astype(np.uint8)
+        if out_key == "yellow" and blue_x_center is not None:
+            lower_raw = np.where(gx >= blue_x_center - 20.0, lower_raw, 0).astype(np.uint8)
+        lower_mask = cv2.morphologyEx(lower_raw, cv2.MORPH_OPEN, k_block_open)
         block = _extract_merged_component(lower_mask, (x1, y1), min_area=200)
         ref_x = (block["bbox"][0], block["bbox"][2]) if block is not None else None
         rod = _extract_merged_component(upper_mask, (x1, y1), min_area=120, ref_x_range=ref_x)
+        if out_key == "blue" and (rod is not None or block is not None):
+            src = rod if rod is not None else block
+            blue_x_center = src["center"][0]
         rows = _rod_band_rows(rod, (x1, y1), k, m, band, x2 - x1) if rod is not None else []
         parts[out_key] = (rod, block, rows)
 
@@ -581,8 +716,6 @@ def detect_frame(image, profile="ground", scene=None, already_rotated=False):
             x_axis, reliable, reasons, info = _measure_rod(rows, out_key, cfg, near)
             if (x_axis is not None and near is None and out_key != front
                     and "rod_width_inconsistent_with_model" in reasons):
-                # 前杆阴影侧常不在颜色掩膜内，间隙看似大于阈值；若后杆可见宽度偏窄且前杆
-                # 就在附近（3 倍间隙内），按近侧被遮挡重新测量。
                 near_wide = _near_side_contact(rows, other_rows, 3.0 * gap)
                 if near_wide is not None and info.get("width_px") and info.get("width_model_px") \
                         and info["width_px"] < info["width_model_px"]:
@@ -630,8 +763,10 @@ def detect_sliders(image_path, profile="ground", scene=None, already_rotated=Fal
 def _write_preview(image_path, output_path, result, already_rotated=False):
     image = _read_image(image_path)
     cfg = SCENES[result["profile"]]
-    rotation = 0 if already_rotated else cfg["rotation_deg"]
-    if rotation == 180:
+    cw, ch = cfg["canonical_size"]
+    oh, ow = image.shape[:2]
+    work_check = cv2.resize(image, (cw, ch), interpolation=cv2.INTER_LINEAR) if (ow, oh) != (cw, ch) else image
+    if not already_rotated and (cfg["rotation_deg"] == 180 or _needs_180_rotation(work_check, cfg["roi"], False)):
         image = cv2.rotate(image, cv2.ROTATE_180)
 
     eps = result.get("rail_endpoints_px")

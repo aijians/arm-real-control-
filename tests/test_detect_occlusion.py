@@ -64,7 +64,6 @@ class OcclusionTests(unittest.TestCase):
         self.assertEqual(orange["measurement"]["occluded_side"], "left")
         self.assertTrue(orange["reliable"], orange["reasons"])
         self.assertLess(abs(orange["pixel_xy"][0] - orange_u), 1.0)
-        # The visible-midpoint method would have been biased by several pixels.
         visible_mid = 0.5 * (blue_u + (model_width("blue", blue_u) - 1) / 2. + 1
                              + orange_u + (model_width("yellow", orange_u) - 1) / 2.)
         self.assertGreater(visible_mid - orange_u, 3.0)
@@ -77,7 +76,7 @@ class OcclusionTests(unittest.TestCase):
         orange_u, blue_u = 624., 596.
         _, right = draw_rod(image, orange_u, model_width("yellow", orange_u), ORANGE_BGR)
         draw_rod(image, blue_u, model_width("blue", blue_u), BLUE_BGR)
-        image[300:600, right - 10:right + 30] = (90, 90, 90)   # e.g. the arm in front of the far edge
+        image[300:600, right - 10:right + 30] = (90, 90, 90)
         orange = detect(image)["sliders"]["yellow"]
         self.assertFalse(orange["reliable"])
 
@@ -85,7 +84,7 @@ class OcclusionTests(unittest.TestCase):
         image = scene()
         left, right = draw_rod(image, 596., model_width("blue", 596.), BLUE_BGR)
         draw_rod(image, 640., model_width("yellow", 640.), ORANGE_BGR)
-        image[300:600, left:left + 12] = (230, 230, 230)        # white push head over blue's left side
+        image[300:600, left:left + 12] = (230, 230, 230)
         blue = detect(image)["sliders"]["blue"]
         self.assertFalse(blue["reliable"])
         self.assertIn("rod_width_inconsistent_with_model", blue["reasons"])
@@ -99,6 +98,20 @@ class OcclusionTests(unittest.TestCase):
         self.assertIn(result["rail_line"]["source"], ("fitted", "nominal_fallback"))
         for item in result["sliders"].values():
             self.assertFalse(item["approximate"])
+
+    def test_glare_and_bracket_bottom_distractors_do_not_corrupt_rail_line(self):
+        image = scene()
+        image[140:195, 580:700] = 250
+        image[515:545, 400:530] = 210
+        draw_rod(image, 451., model_width("blue", 451.), BLUE_BGR)
+        draw_rod(image, 624., model_width("yellow", 624.), ORANGE_BGR)
+        result = detect(image)
+        self.assertEqual(result["rail_line"]["source"], "fitted")
+        self.assertAlmostEqual(result["rail_line"]["k"], K, delta=0.025)
+        for key, u in (("blue", 451.), ("yellow", 624.)):
+            item = result["sliders"][key]
+            self.assertTrue(item["reliable"], item["reasons"])
+            self.assertLess(abs(item["pixel_xy"][0] - u), 0.75)
 
 
 if __name__ == "__main__":

@@ -211,7 +211,7 @@ class Vision:
 
     def _detect(self, image, detector, source):
         del source
-        profile = self.config.get("profile", self.config.get("scene", "ground"))
+        profile = self.config.get("profile", self.config.get("scene", "real"))
         already_rotated = bool(self.config.get("already_rotated", False))
         try:
             pixels = detector(image, profile=profile, already_rotated=already_rotated)

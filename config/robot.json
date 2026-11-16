@@ -201,7 +201,7 @@
   },
   "retry_limit": 3,
   "vision": {
-    "profile": "ground",
+    "profile": "real",
     "shoulder_global_xy_mm": [
       189.3,
       28.5
@@ -234,7 +234,8 @@
         13.44
       ]
     },
-    "beyond_stop_tolerance_mm": 2.5
+    "beyond_stop_tolerance_mm": 2.5,
+    "already_rotated": false
   },
   "paths": {
     "task_file": "input/task.txt",
