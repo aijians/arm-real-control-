@@ -265,7 +265,7 @@ class Planner:
                 and _collision_context[1].get("moving_target")):
             self._checked_edges([p["q_rad"] for p in points], *_collision_context)
             face = self.config["kinematics"]["faces"][metadata["direction"]]
-            metadata["minimum_stem_coverage_mm"] = face["minimum_stem_coverage_mm"]
+            metadata["minimum_stem_coverage_mm"] = face.get("minimum_stem_coverage_mm", 0.)
             metadata["contact_collision_model"] = "moving_stem_on_fixed_rail_y"
         policy_enabled = (hardware.get("motion_recovery", {}).get("enabled", False)
                           and not (name in ("free", "push", "push_correction")
@@ -300,15 +300,17 @@ class Planner:
             position = (max(sliders[color], centre[0]) if direction == "+x"
                         else min(sliders[color], centre[0]))
             sliders = {**sliders, color: [position, self.config["sliders"][color]["y_mm"]]}
-            self._check_stem_coverage(q, direction, sliders[color][1])
+            options = ({"minimum": self.arm.faces[direction].get("minimum_stem_coverage_mm", 0.)}
+                       if contact.get("single_recovery") else {})
+            self._check_stem_coverage(q, direction, sliders[color][1], **options)
         hit = self.scene.check(q, sliders, contact=contact)
         if hit:
             raise PlanError("collision:" + json.dumps(hit, ensure_ascii=False, sort_keys=True))
 
-    def _check_stem_coverage(self, q, direction, rail_y):
+    def _check_stem_coverage(self, q, direction, rail_y, *, minimum=None):
         face = self.config["kinematics"]["faces"][direction]
-        required = face.get("minimum_stem_coverage_mm", 0.)
-        if not required:
+        required = face.get("minimum_stem_coverage_mm", 0.) if minimum is None else minimum
+        if not required and minimum is None:
             return
         segment = [self.arm.forward(q, p) for p in face["contact_segment_canonical_xy_mm"]]
         radius = self.arm.stem_radius_mm
@@ -680,10 +682,11 @@ class Planner:
         if sign * (end[0] - centre[0]) < 0:
             raise PlanError("correction_reentry_would_reverse")
         path, distances = self._line(q, end, direction, q_goal=end_q)
-        context = self._push_context(positions, color, direction)
+        context = (self._recovery_context(positions, color, direction)
+                   if phase.get("single_recovery") else self._push_context(positions, color, direction))
         if context is not None:
             self._checked_edges(path, *context)
-        return self._phase("push_correction", path, distances, self.correction_settings["speed_mm_s"],
+        resumed = self._phase("push_correction", path, distances, self.correction_settings["speed_mm_s"],
             _collision_context=context,
             color=color, direction=direction, task_target_x_mm=phase["task_target_x_mm"],
             feasible_x_limits_mm=phase["feasible_x_limits_mm"],
@@ -691,6 +694,11 @@ class Planner:
             correction_reference_start_mm=phase.get("correction_reference_start_mm", phase["reference_start_mm"]),
             entry_mode="continuous_from_precontact", retry_fixed_endpoint=True, collision_checked=context is not None,
             cartesian_compensation=self._cartesian_compensation(centre, end, direction))
+        if phase.get("single_recovery"):
+            resumed["single_recovery"] = True
+            resumed["extra_reference_distance_mm"] = 1.
+            self._certify_recovery(resumed, positions, color, direction, phase["feasible_x_limits_mm"])
+        return resumed
 
     @staticmethod
     def _push_target(target_x_mm, limits_x_mm):
@@ -770,7 +778,7 @@ class Planner:
             cartesian_compensation=self._cartesian_compensation(centre, end, direction))
 
     def correction(self, q_start, color, task_goal_x_mm, direction, sliders,
-                   limits_x_mm, distance_mm):
+                   limits_x_mm, distance_mm, *, single_recovery=False):
         """Extend the measured tool reference; never replace the task goal.
 
         A small X mismatch between FK and vision is precisely why this phase
@@ -794,7 +802,8 @@ class Planner:
             raise PlanError("contact_face_points_away_from_slider")
         end = [start[0] + sign * distance_mm, start[1]]
         path, distances = self._line(q, end, direction)
-        context = self._push_context(positions, color, direction, reference=start)
+        context = (self._recovery_context(positions, color, direction, reference=start)
+                   if single_recovery else self._push_context(positions, color, direction, reference=start))
         if context is not None:
             self._checked_edges(path, *context)
         return self._phase("push_correction", path, distances, settings["speed_mm_s"],
@@ -807,3 +816,56 @@ class Planner:
             fixed_point_canonical_xy_mm=list(self.arm.faces[direction]["point_canonical_xy_mm"]),
             linear_step_mm=self.settings["linear_step_mm"],
             cartesian_compensation=self._cartesian_compensation(start, end, direction))
+
+    def _recovery_context(self, positions, color, direction, reference=None):
+        positions = dict(positions)
+        if reference is not None:
+            positions[color] = reference[0]
+        return positions, {"color": color, "direction": direction,
+                           "moving_target": True, "single_recovery": True}
+
+    def _certify_recovery(self, phase, positions, color, direction, limits):
+        # Task endpoints include an occupied-end allowance. They are not the
+        # outer pin travel bounds; recoveries may cross a task endpoint only
+        # while the physical rail and the other slider still have clearance.
+        fixed = self.config.get("vision", {}).get("fixed_slider_limits_x_mm")
+        if not fixed or set(fixed) != set(positions):
+            raise PlanError("recovery_physical_limits_unavailable")
+        outer = [min(bounds[0] for bounds in fixed.values()),
+                 max(bounds[1] for bounds in fixed.values())]
+        half_width = max((shape.get("radius_mm", 0.) if shape["shape"] == "circle"
+                          else shape["size_xy_mm"][0] / 2.) for shape in self.scene.slider_shapes)
+        separation = max(2 * half_width + .5,
+            self.config.get("vision", {}).get("rail_geometry", {}).get("occupied_end_clearance_mm", 15.5))
+        points = [p["q_rad"] for p in phase["points"]]
+        context = self._recovery_context(positions, color, direction)
+        self._checked_edges(points, *context)
+        start_x = self.arm.slider_center(points[0], direction)[0]
+        sign = 1 if direction == "+x" else -1
+        for a, b in zip([points[0]] + points[:-1], points):
+            count = max(1, math.ceil(max(abs(v-u) for u, v in zip(a, b)) /
+                                    math.radians(self.settings["collision_step_deg"])))
+            for i in range(count + 1):
+                q = [u + (v-u)*i/count for u, v in zip(a, b)]
+                x = self.arm.slider_center(q, direction)[0]
+                pin_x = max(positions[color], x) if sign > 0 else min(positions[color], x)
+                if not outer[0] <= pin_x <= outer[1]:
+                    raise PlanError("recovery_outside_physical_rail")
+                if any(abs(pin_x-other_x) < separation for other, other_x in positions.items() if other != color):
+                    raise PlanError("recovery_other_slider_clearance")
+                if sign * (x-start_x) < -self.scene.contact_tolerance:
+                    raise PlanError("recovery_would_reverse")
+        all_limits = {c: (limits if c == color else fixed[c]) for c in positions}
+        self.observation_retreat(points[-1], color, direction, positions, limits,
+                                 all_slider_limits=all_limits, require_visibility=False)
+        phase.update(single_recovery=True, recovery_physical_bounds_x_mm=outer,
+                     recovery_minimum_slider_spacing_mm=separation,
+                     recovery_exit_checked=True)
+
+    def recovery_push(self, q_start, color, task_goal_x_mm, direction, sliders, limits_x_mm):
+        """Exactly one extra millimetre from the last measured push reference."""
+        phase = self.correction(q_start, color, task_goal_x_mm, direction, sliders,
+                                limits_x_mm, 1., single_recovery=True)
+        self._certify_recovery(phase, self._positions(sliders), color, direction, limits_x_mm)
+        phase["extra_reference_distance_mm"] = 1.
+        return phase

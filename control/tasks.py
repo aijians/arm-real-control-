@@ -1,10 +1,11 @@
 """Three slider tasks composed from free/continuous-push/withdraw motions."""
 import copy
 import math
+import statistics
 import time
 
 from .targets import normalize_task, TargetResolver
-from .config import push_correction_settings
+from .config import push_correction_settings, verification_aggregation_settings
 
 
 class TaskError(RuntimeError):
@@ -33,6 +34,7 @@ class TaskRunner:
         self.motors, self.vision = motors, vision
         verification = config["verification"]
         self.tolerance = float(verification["tolerance_mm"])
+        self.verification_aggregation, self.verification_max_spread = verification_aggregation_settings(config)
         window = verification.get("endpoint_window_mm", [self.tolerance, self.tolerance])
         if not isinstance(window, (list, tuple)) or len(window) != 2:
             raise ValueError("verification.endpoint_window_mm must be [under_mm, over_mm]")
@@ -176,7 +178,7 @@ class TaskRunner:
         return reliable, reasons
 
     def _verify(self, color, goal, after, sign=None):
-        """连续取帧验收；只有可靠帧计入。不可靠帧最多补取 unreliable_extra_samples 帧。"""
+        """Fresh reliable frames, with bounded reads and optional stable median."""
         if sign is None:
             sign = self._endpoint_sign(color, goal) or 1
         under, over = self._band(color, goal)
@@ -198,7 +200,8 @@ class TaskRunner:
                 # 端点任务读数越过物理终点余量：实体不可能越过止挡，按视觉不可靠处理。
                 reliable = False
                 reasons.append("reading_beyond_target_end_window")
-            samples.append({"error_mm": error, "stamp_monotonic_s": state["stamp_monotonic_s"],
+            samples.append({"error_mm": error, "x_mm": actual,
+                            "stamp_monotonic_s": state["stamp_monotonic_s"],
                             "reliable": reliable, "reasons": reasons})
             if reliable:
                 reliable_states.append(state)
@@ -207,6 +210,26 @@ class TaskRunner:
                   "reliable_samples": len(reliable_states), "unreliable": False, "forced": False}
         if len(reliable_states) >= needed:
             errors = [sign * (float(s["sliders_x_mm"][color]) - goal) for s in reliable_states]
+            if self.verification_aggregation == "median":
+                positions = [float(s["sliders_x_mm"][color]) for s in reliable_states]
+                median = statistics.median(positions)
+                spread = max(positions) - min(positions)
+                stable = spread <= self.verification_max_spread
+                observed = copy.deepcopy(reliable_states[-1])
+                observed["raw_last_sliders_x_mm"] = dict(observed["sliders_x_mm"])
+                observed["sliders_x_mm"][color] = median
+                result.update(aggregation="median", median_x_mm=median,
+                    median_signed_error_mm=sign * (median - goal), spread_mm=spread,
+                    max_spread_mm=self.verification_max_spread, stable=stable,
+                    passed=stable and -under <= sign * (median - goal) <= over,
+                    last_observation=observed)
+                if not stable:
+                    result.update(unreliable=True,
+                                  unreliable_reasons=["verification_position_unstable"])
+                print("[vision] median %s: x=%.3f mm, error=%.3f mm, spread=%.3f mm; %s" %
+                      (color, median, sign * (median - goal), spread,
+                       "passed" if result["passed"] else "not passed"), flush=True)
+                return result
             result.update(passed=all(-under <= e <= over for e in errors),
                           last_observation=reliable_states[-1])
             return result
@@ -231,10 +254,10 @@ class TaskRunner:
                 "reliable_samples": verification.get("reliable_samples"),
                 "samples": verification.get("samples")})
 
-    def _stage(self, name, state, record, action):
+    def _stage(self, name, state, record, action, *, retry_limit=None):
         """Each stage owns its initial attempt plus retry_limit retries."""
         attempts = record.setdefault("stage_attempts", {}).setdefault(name, [])
-        limit = int(self.config["retry_limit"])
+        limit = int(self.config["retry_limit"]) if retry_limit is None else retry_limit
         for number in range(limit + 1):
             attempt = {"attempt": number}
             attempts.append(attempt)
@@ -393,7 +416,8 @@ class TaskRunner:
         self._raise_if_unreliable(verification)
         return verification, error
 
-    def _push_stage(self, name, factory, color, goal, direction, state, record):
+    def _push_stage(self, name, factory, color, goal, direction, state, record, *,
+                    retry_limit=None, require_progress=True):
         under, over = self._band(color, goal)
         def push(attempt):
             sign = 1 if direction == "+x" else -1
@@ -427,10 +451,10 @@ class TaskRunner:
                 # 仅可靠帧可到达此处（不可靠已在 _stopped_push 中报 verification_unreliable）。
                 if sign * (actual - goal) > over:
                     raise TaskError("slider_overshot_target")
-                if sign * (actual - before) < self.correction_settings["min_progress_mm"]:
+                if require_progress and sign * (actual - before) < self.correction_settings["min_progress_mm"]:
                     raise TaskError("push_no_progress")
             return verification, None
-        result = self._stage(name, state, record, push)
+        result = self._stage(name, state, record, push, retry_limit=retry_limit)
         # Keep the established stopped-verification fields for result readers.
         last = record["stage_attempts"][name][-1]
         for key in ("stop", "verification", "verification_after_monotonic_s", "push_motor_error",
@@ -438,6 +462,48 @@ class TaskRunner:
             if key in last:
                 record[key] = last[key]
         return result
+
+    def _single_recovery(self, color, goal, direction, state, record, verification, error):
+        """One fixed +1 mm tool-reference extension, then stopped observation."""
+        state.update(verification["last_observation"])
+        if verification["passed"]:
+            state["q_rad"] = self.motors.read_state()["q_rad"]
+            return state
+        if error is not None:
+            raise error
+        self._raise_if_unreliable(verification)
+        sign = 1 if direction == "+x" else -1
+        before = float(state["sliders_x_mm"][color])
+        under, over = self._band(color, goal)
+        signed = sign * (before - goal)
+        if signed > over:
+            raise TaskError("slider_overshot_target")
+        if signed >= -under:
+            raise TaskError("slider_not_stably_at_target")
+        correction = {"step": 1, "extension_mm": 1., "cumulative_extension_mm": 1.,
+                      "task_target_x_mm": goal, "before_x_mm": before, "single_recovery": True}
+        record["corrections"].append(correction)
+        # Certify before leaving home. A blocked plan must not trigger reentry.
+        phase = self.planner.recovery_push(state["last_push_q_rad"], color, goal, direction,
+            state["sliders_x_mm"], self.targets.bounds(color))
+        correction.update(reference_start_mm=phase["reference_start_mm"],
+                          reference_target_mm=phase["reference_target_mm"])
+        def factory():
+            return self.planner.reenter_correction(phase, state["q_rad"], state["sliders_x_mm"])
+        print("[motion] single recovery: +1.000 mm along " + direction, flush=True)
+        verification, error = self._push_stage("push_correction", factory, color, goal,
+            direction, state, correction, retry_limit=0, require_progress=False)
+        state.update(verification["last_observation"])
+        correction["after_x_mm"] = float(state["sliders_x_mm"][color])
+        correction["progress_mm"] = sign * (correction["after_x_mm"] - before)
+        if error is not None:
+            raise error
+        if not verification["passed"]:
+            raise TaskError("slider_not_at_target_after_single_recovery", {
+                "remaining_mm": sign * (goal - correction["after_x_mm"]),
+                "recovery_count": 1, "extension_mm": 1.})
+        state["q_rad"] = self.motors.read_state()["q_rad"]
+        return state
 
     def _free_entry(self, color, direction, state, record):
         # Even a partial entry must clear the camera view before retry images.
@@ -451,8 +517,11 @@ class TaskRunner:
         before = float(state["sliders_x_mm"][color])
         verification, error = self._push_stage("push", lambda: self.planner.push(
             state["q_rad"], color, goal, state["sliders_x_mm"], self.targets.bounds(color)),
-            color, goal, direction, state, record)
+            color, goal, direction, state, record,
+            require_progress=not self.correction_settings["single_recovery"])
         corrections = record["corrections"] = []
+        if self.correction_settings["single_recovery"]:
+            return self._single_recovery(color, goal, direction, state, record, verification, error)
         used = 0.
         settings = self.correction_settings
         while True:
@@ -650,6 +719,8 @@ class TaskRunner:
                 # frames at home. Do not issue an unnecessary second return.
                 result["return_motion"] = {"target_q_deg": list(self.return_q_deg),
                     "status": "completed", "completed_before_verification": True}
+                if self.return_upper_min_deg is not None:
+                    result["return_motion"]["upper_min_deg_exclusive"] = self.return_upper_min_deg
             else:
                 result["return_motion"] = {"target_q_deg": list(self.return_q_deg)}
                 self._stage("return", state, result["return_motion"],

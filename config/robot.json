@@ -134,12 +134,28 @@
     "task_start_pid": {
       "enabled": true,
       "upper": {
-        "angle": {"kp": 50, "ki": 0, "kd": 0},
-        "speed": {"kp": 500, "ki": 25, "kd": 0}
+        "angle": {
+          "kp": 50,
+          "ki": 0,
+          "kd": 0
+        },
+        "speed": {
+          "kp": 500,
+          "ki": 25,
+          "kd": 0
+        }
       },
       "lower": {
-        "angle": {"kp": 50, "ki": 0, "kd": 0},
-        "speed": {"kp": 500, "ki": 25, "kd": 0}
+        "angle": {
+          "kp": 50,
+          "ki": 0,
+          "kd": 0
+        },
+        "speed": {
+          "kp": 500,
+          "ki": 25,
+          "kd": 0
+        }
       }
     },
     "free_timed_motion": {
@@ -150,7 +166,11 @@
       "period_s": 0.05,
       "oscillation_downshift": {
         "enabled": true,
-        "speed_tiers_deg_s": [18.0, 30.0, 60.0],
+        "speed_tiers_deg_s": [
+          18.0,
+          30.0,
+          60.0
+        ],
         "oscillation_window_s": 1.2,
         "oscillation_amplitude_deg": 0.12,
         "oscillation_reversal_deg": 0.04,
@@ -167,7 +187,7 @@
   },
   "verification": {
     "tolerance_mm": 0.5,
-    "samples": 3,
+    "samples": 5,
     "interval_s": 0.2,
     "endpoint_window_mm": [
       2.5,
@@ -175,7 +195,9 @@
     ],
     "stationary_drift_mm": 1.0,
     "unreliable_extra_samples": 3,
-    "force_pass_unreliable": false
+    "force_pass_unreliable": false,
+    "aggregation": "median",
+    "max_spread_mm": 0.2
   },
   "retry_limit": 3,
   "vision": {
@@ -291,5 +313,13 @@
     "slider": {
       "stem_radius_mm": 4.0
     }
+  },
+  "push_correction": {
+    "single_recovery": true,
+    "max_steps": 1,
+    "step_mm": 1.0,
+    "max_distance_mm": 1.0,
+    "speed_mm_s": 1.0,
+    "min_progress_mm": 0.2
   }
 }

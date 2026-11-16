@@ -71,7 +71,7 @@ class Motors:
             self.q[0] = phase["reference_target_mm"][0]
             if isinstance(outcome, tuple):
                 raise RuntimeError(outcome[1])
-        if phase.get("route") == "observation_retreat":
+        if phase.get("route") in ("observation_retreat", "return_departure"):
             self.vision.occluded = False
         return {"status": "completed", "phase": phase["phase"]}
 
@@ -122,6 +122,7 @@ class BoundedPushTests(unittest.TestCase):
     def runner(self, outcomes, start=-10., **settings):
         config = json.loads((ROOT / "config/robot.json").read_text())
         config["verification"] = {"tolerance_mm": .5, "samples": 2, "interval_s": .001}
+        config["push_correction"] = {"single_recovery": False}
         config.setdefault("push_correction", {}).update(settings)
         vision = Vision(start)
         motors = Motors(vision, outcomes)
@@ -280,7 +281,9 @@ class BoundedPushTests(unittest.TestCase):
 
 class CorrectionGeometryTests(unittest.TestCase):
     def setUp(self):
-        self.planner = Planner(ROOT)
+        config = json.loads((ROOT / "config/robot.json").read_text())
+        config["push_correction"] = {"single_recovery": False}
+        self.planner = Planner(ROOT, config)
 
     def q(self, x, direction="+x", y=155.):
         return self.planner.arm.inverse([x, y], direction)
@@ -404,7 +407,8 @@ class CorrectionGeometryTests(unittest.TestCase):
                 altered.setdefault("push_correction", {})[key] = value
                 with self.assertRaises(ValueError):
                     validate_config(altered)
-        self.assertEqual(push_correction_settings(config)["max_steps"], 3)
+        self.assertEqual(push_correction_settings(config)["max_steps"], 1)
+        self.assertEqual(push_correction_settings({})["max_steps"], 3)
 
 
 class ReferenceContactExemptionTests(unittest.TestCase):

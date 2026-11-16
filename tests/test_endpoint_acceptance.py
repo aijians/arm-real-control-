@@ -103,6 +103,8 @@ class EndpointAcceptanceTests(unittest.TestCase):
     def runner(self, frames, pushes, force=False):
         config = json.loads((ROOT / "config/robot.json").read_text())
         config["verification"].update(samples=3, interval_s=.001, force_pass_unreliable=force)
+        config["verification"]["aggregation"] = "all"
+        config["push_correction"] = {"single_recovery": False}
         vision, motors, planner = Vision(frames), Motors(pushes), Planner()
         runner = TaskRunner(planner, config, motors, vision)
         runner._withdraw = lambda *_: None

@@ -13,7 +13,7 @@ from .timed_downshift import timed_downshift_settings
 
 def push_correction_settings(config):
     settings = {"max_steps": 3, "step_mm": 1.0, "max_distance_mm": 3.0,
-                "speed_mm_s": 1.0, "min_progress_mm": 0.2,
+                "speed_mm_s": 1.0, "min_progress_mm": 0.2, "single_recovery": False,
                 **config.get("push_correction", {})}
     if type(settings["max_steps"]) is not int or not 0 <= settings["max_steps"] <= 3:
         raise ValueError("push_correction.max_steps must be an integer in 0..3")
@@ -22,7 +22,23 @@ def push_correction_settings(config):
         value = settings[name]
         if type(value) not in (int, float) or not math.isfinite(value) or not 0 < value <= upper:
             raise ValueError("invalid push_correction." + name)
+    if not isinstance(settings["single_recovery"], bool):
+        raise ValueError("invalid push_correction.single_recovery")
+    if settings["single_recovery"] and (settings["max_steps"] != 1
+            or settings["step_mm"] != 1. or settings["max_distance_mm"] != 1.):
+        raise ValueError("single recovery requires one step of exactly 1 mm")
     return settings
+
+
+def verification_aggregation_settings(config):
+    verify = config["verification"]
+    mode = verify.get("aggregation", "all")
+    spread = verify.get("max_spread_mm", .2)
+    if mode not in ("all", "median"):
+        raise ValueError("invalid verification.aggregation")
+    if type(spread) not in (int, float) or not math.isfinite(spread) or spread <= 0:
+        raise ValueError("invalid verification.max_spread_mm")
+    return mode, float(spread)
 
 
 def read_json(path):
@@ -88,6 +104,7 @@ def validate_config(config):
     if type(config["retry_limit"]) is not int or not 0 <= config["retry_limit"] <= 3:
         raise ValueError("retry_limit must be an integer in 0..3")
     verify = config["verification"]
+    verification_aggregation_settings(config)
     if type(verify["samples"]) is not int or not 1 <= verify["samples"] <= 10:
         raise ValueError("verification.samples must be an integer in 1..10")
     for name, value in [("poll_interval_s", config["poll_interval_s"]),
