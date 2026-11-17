@@ -2,15 +2,18 @@
 """将滑杆轴线像素与导轨真实端点像素转换到世界坐标系，单位为毫米。
 
 坐标系说明：
-1. 全局箱体坐标系 (world_equals_global_z_up)：
+1. 历史默认箱体坐标系 (world_equals_global_z_up)：
    - 原点：箱体左下内角；+X 水平向右，+Y 水平指向滑杆导轨墙面，+Z 竖直向上（右手法则）。
-   - 最新实测标定值：
+   - 历史默认标定值（新测世界系通过完整 calibration 显式提供）：
      * ground 与 real 相机名义光心位置 C_world_mm = [24.5, 99.0, -108.0] mm
      * real（及重装后倒装 ground）原图物理倒装 180°；检测器先转正，坐标转换使用转正视图的 K、D、R
      * 导轨滑杆轴心平面 plane_y_mm = 183.5 mm（底座 Y=28.5 mm + 155.0 mm）
      * 导轨前挡边表面平面 rail_lip_y_mm = 174.5 mm（左、右导轨端点统一按同一前挡边平面求交）
      * 当检测结果包含实测拟合导轨线 rail_line (source='fitted') 时，自动根据导轨透视斜率与高度区间
        按现有分支补偿安装姿态角（Roll/Yaw）；光心保持用户指定的 [24.5, 99.0, -108.0] mm。
+2. 完整显式标定可声明 world_handedness='left' 及独立的 world_coordinate_frame。
+   此时 R_world_from_camera 是 det=-1 的正交坐标基变换，不能称为物理旋转。
+   显式标定不叠加历史导轨姿态补偿；180°倒装由检测器统一转正一次。
 """
 
 import argparse
@@ -170,9 +173,20 @@ def _calibration(calibration):
     centre = _finite_array(config["C_world_mm"], (3,), "C_world_mm")
     rotation = _finite_array(config["R_world_from_camera"], (3, 3),
                              "R_world_from_camera")
+    # A camera basis is right handed. A left-handed reporting world therefore
+    # requires an orthogonal basis change with det=-1, not a physical rotation.
+    handedness = config.get("world_handedness", "right")
+    if handedness not in ("right", "left"):
+        raise ValueError("world_handedness 必须为 right 或 left")
+    expected_det = 1.0 if handedness == "right" else -1.0
     if (not np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-6, rtol=0)
-            or not np.isclose(np.linalg.det(rotation), 1.0, atol=1e-6, rtol=0)):
-        raise ValueError("R_world_from_camera 必须是正交且行列式为 +1 的旋转矩阵")
+            or not np.isclose(np.linalg.det(rotation), expected_det, atol=1e-6, rtol=0)):
+        raise ValueError("R_world_from_camera 必须正交且行列式与 world_handedness 一致")
+    coordinate_frame = config.get("world_coordinate_frame", "world_equals_global_z_up")
+    if not isinstance(coordinate_frame, str) or not coordinate_frame.strip():
+        raise ValueError("world_coordinate_frame 必须是非空字符串")
+    if handedness == "left" and coordinate_frame == "world_equals_global_z_up":
+        raise ValueError("左手世界系必须显式指定区别于旧世界系的 world_coordinate_frame")
     plane_y = _finite_number(config["plane_y_mm"], "plane_y_mm")
     rail_lip_y = _finite_number(config.get("rail_lip_y_mm", plane_y - 9.0), "rail_lip_y_mm")
     approximate = config.get("is_approximate", True)
@@ -192,6 +206,8 @@ def _calibration(calibration):
                    "pixels_are_undistorted": undistorted,
                    "C_world_mm": centre.tolist(),
                    "R_world_from_camera": rotation.tolist(),
+                   "world_handedness": handedness,
+                   "world_coordinate_frame": coordinate_frame,
                    "plane_y_mm": plane_y,
                    "rail_lip_y_mm": rail_lip_y,
                    "is_approximate": approximate,
@@ -338,7 +354,8 @@ def pixel_to_world(pixel_xy, image_size_px=(1920, 1080), calibration=None,
         "position_definition": definition,
         "method": method,
         "units": "mm",
-        "coordinate_frame": "world_equals_global_z_up",
+        "coordinate_frame": config["world_coordinate_frame"],
+        "world_handedness": config["world_handedness"],
         "is_approximate": config["is_approximate"],
     }
     if rail_z_mm is not None:
@@ -376,6 +393,7 @@ def convert_detections(payload, calibration=None, rail_z_mm=None):
 
     active_config = (config if explicit
                      else _refine_pose_for_rail_line(config, payload.get("rail_line")))
+    active_config, _ = _calibration(active_config)
 
     sliders = payload.get("sliders")
     if not isinstance(sliders, dict):
@@ -435,13 +453,14 @@ def convert_detections(payload, calibration=None, rail_z_mm=None):
         "input_size_px": list(size),
         "status": "complete" if found == 2 else ("partial" if found else "missing"),
         "units": "mm",
-        "coordinate_frame": "world_equals_global_z_up",
+        "coordinate_frame": active_config["world_coordinate_frame"],
+        "world_handedness": active_config["world_handedness"],
         "position_definition": ("shaft_axis_reference_point" if rail_z_mm is None
                                 else "vertical_shaft_axis_at_known_rail_height"),
         "is_approximate": config["is_approximate"] or any(
             converted[c] is not None and converted[c]["is_approximate"] for c in ("blue", "yellow")),
-        "calibration": config,
-        "distortion_handling": _distortion_handling(config),
+        "calibration": active_config,
+        "distortion_handling": _distortion_handling(active_config),
         "rail_line_kb": payload.get("rail_line_kb"),
         "rail_line_fallback": bool(payload.get("rail_line_fallback", False)),
         "rail_endpoints_px": eps_px,

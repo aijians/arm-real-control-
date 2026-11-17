@@ -38,11 +38,9 @@ def _finite(value, name):
 class Vision:
     """A task owns one video stream. Detection reads its latest new frame.
 
-    Project Coordinate System (Robot Shoulder Origin):
-      - Origin (0, 0, 0): Robot arm base joint center (`shoulder_global_xy_mm = [189.30, 28.50]`)
-      - +X axis: Horizontal right along the slider rail (`X_model = X_global - 189.30 mm`)
-      - +Y axis: Horizontal forward towards the slider rail (`Y_model = Y_global - 28.50 = 155.00 mm`)
-      - +Z axis: Vertically upward perpendicular to XY plane (right-hand rule)
+    Model axes remain the robot's right-handed shoulder frame. World positions
+    use the configured shoulder origin and per-axis signs; reversing a reporting
+    world axis must not reverse the robot model or alter motor offsets.
     """
 
     def __init__(self, root, config):
@@ -55,10 +53,23 @@ class Vision:
         self.last_sequence = 0
         self.last_video = {"status": "not_started", "file": None}
 
-        shoulder = config.get("shoulder_global_xy_mm", [189.30, 28.50])
-        if not isinstance(shoulder, (list, tuple)) or len(shoulder) != 2:
-            raise VisionError("shoulder_global_xy_mm must contain X,Y")
-        self.shoulder = [_finite(x, "shoulder_global_xy_mm") for x in shoulder]
+        shoulder = config.get("shoulder_global_xyz_mm")
+        if shoulder is None:
+            shoulder_xy = config.get("shoulder_global_xy_mm", [189.30, 28.50])
+            if not isinstance(shoulder_xy, (list, tuple)) or len(shoulder_xy) != 2:
+                raise VisionError("shoulder_global_xy_mm must contain X,Y")
+            shoulder = [*shoulder_xy, 0.0]
+        elif "shoulder_global_xy_mm" in config:
+            raise VisionError("configure only one shoulder world position")
+        if not isinstance(shoulder, (list, tuple)) or len(shoulder) != 3:
+            raise VisionError("shoulder_global_xyz_mm must contain X,Y,Z")
+        self.shoulder = [_finite(x, "shoulder_global_xyz_mm") for x in shoulder]
+        signs = config.get("world_to_model_axis_signs", [1, 1, 1])
+        if not isinstance(signs, (list, tuple)) or len(signs) != 3:
+            raise VisionError("world_to_model_axis_signs must contain three signs")
+        self.axis_signs = [_finite(x, "world_to_model_axis_signs") for x in signs]
+        if any(x not in (-1., 1.) for x in self.axis_signs):
+            raise VisionError("world_to_model_axis_signs must be +1 or -1")
         self.rail_y = _finite(config.get("rail_model_y_mm", 155.0), "rail_model_y_mm")
         self.y_tolerance = _finite(config.get("rail_y_tolerance_mm", 0.01), "rail_y_tolerance_mm")
 
@@ -106,14 +117,29 @@ class Vision:
                 path = self.root / path
             self.calibration = json.loads(path.read_text(encoding="utf-8"))
 
+        cal = self.calibration or DEFAULT_CALIBRATION
+        self.world_frame = cal.get("world_coordinate_frame", "world_equals_global_z_up")
+        world_handedness = cal.get("world_handedness", "right")
+        if world_handedness not in ("right", "left"):
+            raise VisionError("invalid world_handedness")
+        expected_det = 1 if world_handedness == "right" else -1
+        if math.prod(self.axis_signs) != expected_det:
+            raise VisionError("world_to_model handedness mismatch")
+
         cal_plane_y = _finite(
-            (self.calibration or DEFAULT_CALIBRATION).get("plane_y_mm", 183.5), "plane_y_mm"
+            cal.get("plane_y_mm", 183.5), "plane_y_mm"
         )
-        if abs((cal_plane_y - self.shoulder[1]) - self.rail_y) > self.y_tolerance:
+        if abs(self.axis_signs[1] * (cal_plane_y - self.shoulder[1]) - self.rail_y) > self.y_tolerance:
             raise VisionError(
                 f"vision_model_rail_y_mismatch: plane_y({cal_plane_y}) - shoulder_y({self.shoulder[1]}) "
                 f"!= rail_model_y_mm({self.rail_y})"
             )
+
+    def _world_to_model(self, xyz):
+        if not isinstance(xyz, (list, tuple)) or len(xyz) != 3:
+            raise VisionError("world_xyz_mm must contain X,Y,Z")
+        return [sign * (_finite(value, "world_xyz_mm") - origin)
+                for value, origin, sign in zip(xyz, self.shoulder, self.axis_signs)]
 
     def start(self, task_id):
         if self.camera is not None:
@@ -162,14 +188,12 @@ class Vision:
         if not isinstance(rail_ep, dict) or not rail_ep.get("left") or not rail_ep.get("right"):
             return None
         try:
-            xl_glob = _finite(rail_ep["left"]["world_xyz_mm"][0], "rail_left_x")
-            xr_glob = _finite(rail_ep["right"]["world_xyz_mm"][0], "rail_right_x")
+            xl_mod = self._world_to_model(rail_ep["left"]["world_xyz_mm"])[0]
+            xr_mod = self._world_to_model(rail_ep["right"]["world_xyz_mm"])[0]
         except (KeyError, IndexError, TypeError, VisionError):
             report["reason"] = "rail_endpoint_coordinates_invalid"
             return None
 
-        xl_mod = xl_glob - self.shoulder[0]
-        xr_mod = xr_glob - self.shoulder[0]
         span_mm = xr_mod - xl_mod
         report.update(endpoints_x_mm=[xl_mod, xr_mod], span_mm=span_mm,
                       allowed_span_mm=[self.min_rail_span_mm, self.max_rail_span_mm])
@@ -220,7 +244,7 @@ class Vision:
         except Exception as exc:
             raise VisionError("slider_detection_failed: " + str(exc)) from exc
         if (world.get("units") != "mm"
-                or world.get("coordinate_frame") != "world_equals_global_z_up"
+                or world.get("coordinate_frame") != self.world_frame
                 or world.get("position_definition") not in (
                     "shaft_axis_reference_point", "vertical_shaft_axis_at_known_rail_height")):
             raise VisionError("unknown_vision_coordinate_contract")
@@ -235,13 +259,12 @@ class Vision:
             xyz = item.get("world_xyz_mm")
             if not isinstance(xyz, (list, tuple)) or len(xyz) != 3:
                 raise VisionError("invalid_world_xyz_mm: " + color)
-            x, y, _ = [_finite(v, "world_xyz_mm") for v in xyz]
-            model_y = y - self.shoulder[1]
+            model_x, model_y, _ = self._world_to_model(xyz)
             if abs(model_y - self.rail_y) > self.y_tolerance:
                 raise VisionError(
                     f"vision_model_rail_y_mismatch: got {model_y:.3f} mm, expected {self.rail_y:.3f} mm"
                 )
-            positions[color] = x - self.shoulder[0]
+            positions[color] = model_x
 
         if positions["蓝"] >= positions["橙"]:
             raise VisionError("slider_order_invalid: 蓝 must be left of 橙")
@@ -249,7 +272,11 @@ class Vision:
         # 导轨端点与由其推出的行程只作诊断记录，不参与通过/拒绝；行程采用模型固定值。
         rail_observation = {"endpoints_px": pixels.get("rail_endpoints_px"),
                             "rail_line": pixels.get("rail_line"),
-                            "limits_source": "fixed_model"}
+                            "limits_source": "fixed_model",
+                            "calibration": world.get("calibration"),
+                            "world_to_model": {"world_coordinate_frame": self.world_frame,
+                                "shoulder_global_xyz_mm": list(self.shoulder),
+                                "axis_signs": list(self.axis_signs)}}
         diagnostic = {}
         self._compute_slider_limits(world, positions, diagnostic)
         rail_observation["endpoint_diagnostic"] = diagnostic
