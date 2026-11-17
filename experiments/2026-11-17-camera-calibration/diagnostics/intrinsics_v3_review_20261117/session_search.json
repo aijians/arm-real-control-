@@ -1,0 +1,20 @@
+[
+  {
+    "path": "/var/lib/camera-calibration-video22/20260507T174645Z_a528a2/calibration.json",
+    "sample_count": 41,
+    "created_utc": "2026-05-07T18:08:56.240423+00:00",
+    "canonical_match": false
+  },
+  {
+    "path": "/var/lib/camera-calibration-video22/20260510T171727Z_b1af0a/calibration.json",
+    "sample_count": 34,
+    "created_utc": "2026-05-10T17:28:29.497956+00:00",
+    "canonical_match": true
+  },
+  {
+    "path": "/var/lib/camera-calibration-video22/20260510T170657Z_b0a8ad/calibration.json",
+    "sample_count": 30,
+    "created_utc": "2026-05-10T17:21:24.227120+00:00",
+    "canonical_match": false
+  }
+]

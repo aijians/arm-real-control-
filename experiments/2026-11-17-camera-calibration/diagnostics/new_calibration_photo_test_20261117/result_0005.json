@@ -1,0 +1,489 @@
+{
+  "photo": "0005",
+  "image": "photo_0005_ce285e3d.png",
+  "source_image_sha256": "294d000bb72256181234ecf8e5f2b16b075ce02d2ee71b70bad982a6d10b439d",
+  "reference_note": "世界坐标x橙：75，蓝;105",
+  "input_frame": "sensor_raw",
+  "image_rotated_once": true,
+  "pixels_identical_to_previous": true,
+  "metadata_old_reference_geometry_ignored": true,
+  "pixels": {
+    "schema_version": 1,
+    "profile": "real",
+    "input_size_px": [
+      1920,
+      1080
+    ],
+    "status": "complete",
+    "position_definition": "shaft_axis_intersection_with_image_reference_line",
+    "rail_line": {
+      "k": 0.386998,
+      "m": 138.59,
+      "source": "fitted"
+    },
+    "rail_endpoints_px": [
+      [
+        462.64,
+        317.63
+      ],
+      [
+        677.23,
+        400.68
+      ]
+    ],
+    "sliders": {
+      "blue": {
+        "pixel_xy": [
+          494.35,
+          329.9
+        ],
+        "reference_method": "rod_band_both_edges",
+        "representative_part": "rod",
+        "approximate": false,
+        "reliable": true,
+        "reasons": [],
+        "measurement": {
+          "rows_in_band": 40,
+          "rows_used": 40,
+          "occluded_side": null,
+          "width_px": 46.3,
+          "width_model_px": 52.69,
+          "method": "rod_band_both_edges"
+        }
+      },
+      "yellow": {
+        "pixel_xy": [
+          581.3,
+          363.55
+        ],
+        "reference_method": "rod_band_both_edges",
+        "representative_part": "rod",
+        "approximate": false,
+        "reliable": true,
+        "reasons": [],
+        "measurement": {
+          "rows_in_band": 40,
+          "rows_used": 40,
+          "occluded_side": null,
+          "width_px": 40.6,
+          "width_model_px": 43.14,
+          "method": "rod_band_both_edges"
+        }
+      }
+    }
+  },
+  "world": {
+    "schema_version": 1,
+    "profile": "real",
+    "input_size_px": [
+      1920,
+      1080
+    ],
+    "status": "complete",
+    "units": "mm",
+    "coordinate_frame": "measured_world_x_reversed_20261117",
+    "world_handedness": "left",
+    "position_definition": "shaft_axis_reference_point",
+    "is_approximate": true,
+    "calibration": {
+      "name": "known_world_checkerboard_candidate",
+      "image_size_px": [
+        1920,
+        1080
+      ],
+      "C_world_mm": [
+        230.11437650326502,
+        98.55605488168251,
+        -98.18823749349983
+      ],
+      "distortion_model": "plumb_bob",
+      "pixels_are_undistorted": false,
+      "world_handedness": "left",
+      "world_coordinate_frame": "measured_world_x_reversed_20261117",
+      "plane_y_mm": 181.5,
+      "rail_lip_y_mm": 172.5,
+      "intrinsics_device": "/dev/video31",
+      "intrinsics_sensor": "m01_f_imx415 4-001a / rkisp1-vir0",
+      "intrinsics_source_sha256": "5b64b25da2d103167058a41fe15cf6259c6d9087cf0fd8b3cb0577d79c18562e",
+      "is_approximate": true,
+      "source": "known_world_checkerboard_fixed_intrinsics",
+      "validation_status": "reprojection_only_independent_world_validation_required",
+      "K": [
+        [
+          704.2315207501406,
+          0.0,
+          950.9108069588113
+        ],
+        [
+          0.0,
+          700.8145421326399,
+          463.000307663954
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "D": [
+        0.09732725405832797,
+        -0.1614774641518489,
+        -0.015191157430943193,
+        -0.003816600672756129,
+        0.07199530637816304
+      ],
+      "R_world_from_camera": [
+        [
+          -0.00831517341890216,
+          -0.04000594887786535,
+          -0.999164842228446
+        ],
+        [
+          -0.9999373368592216,
+          -0.007156947774859545,
+          0.008608162024235535
+        ],
+        [
+          0.007495348284178713,
+          -0.9991738097813261,
+          0.03994393071756086
+        ]
+      ],
+      "pixel_coordinate_frame": "scene_upright",
+      "assumptions": []
+    },
+    "distortion_handling": "opencv_undistortPointsIter_plumb_bob",
+    "rail_line_kb": null,
+    "rail_line_fallback": false,
+    "rail_endpoints_px": [
+      [
+        462.64,
+        317.63
+      ],
+      [
+        677.23,
+        400.68
+      ]
+    ],
+    "rail_endpoints": {
+      "left": {
+        "pixel_xy": [
+          462.64,
+          317.63
+        ],
+        "world_xyz_mm": [
+          123.28103047859787,
+          172.5,
+          -73.34877771938832
+        ],
+        "position_definition": "shaft_axis_reference_point",
+        "method": "pixel_ray_intersection_with_known_world_y_plane",
+        "units": "mm",
+        "coordinate_frame": "measured_world_x_reversed_20261117",
+        "world_handedness": "left",
+        "is_approximate": true
+      },
+      "right": {
+        "pixel_xy": [
+          677.23,
+          400.68
+        ],
+        "world_xyz_mm": [
+          42.30513438600903,
+          172.5,
+          -75.07021194975178
+        ],
+        "position_definition": "shaft_axis_reference_point",
+        "method": "pixel_ray_intersection_with_known_world_y_plane",
+        "units": "mm",
+        "coordinate_frame": "measured_world_x_reversed_20261117",
+        "world_handedness": "left",
+        "is_approximate": true
+      }
+    },
+    "sliders": {
+      "blue": {
+        "pixel_xy": [
+          494.35,
+          329.9
+        ],
+        "world_xyz_mm": [
+          102.0145680058724,
+          181.5,
+          -70.47019592920019
+        ],
+        "position_definition": "shaft_axis_reference_point",
+        "method": "pixel_ray_intersection_with_known_world_y_plane",
+        "units": "mm",
+        "coordinate_frame": "measured_world_x_reversed_20261117",
+        "world_handedness": "left",
+        "is_approximate": true,
+        "reference_method": "rod_band_both_edges",
+        "representative_part": "rod",
+        "approximate": false,
+        "reliable": true,
+        "reasons": []
+      },
+      "yellow": {
+        "pixel_xy": [
+          581.3,
+          363.55
+        ],
+        "world_xyz_mm": [
+          72.56761207442298,
+          181.5,
+          -71.0563838996076
+        ],
+        "position_definition": "shaft_axis_reference_point",
+        "method": "pixel_ray_intersection_with_known_world_y_plane",
+        "units": "mm",
+        "coordinate_frame": "measured_world_x_reversed_20261117",
+        "world_handedness": "left",
+        "is_approximate": true,
+        "reference_method": "rod_band_both_edges",
+        "representative_part": "rod",
+        "approximate": false,
+        "reliable": true,
+        "reasons": []
+      }
+    }
+  },
+  "task_observation": {
+    "sliders_x_mm": {
+      "橙": -7.567612074422982,
+      "蓝": -37.014568005872405
+    },
+    "slider_limits_x_mm": {
+      "蓝": [
+        -48.5,
+        -4.0
+      ],
+      "橙": [
+        -33.0,
+        11.5
+      ]
+    },
+    "reliability": {
+      "蓝": {
+        "reliable": true,
+        "reasons": [],
+        "method": "rod_band_both_edges",
+        "occluded_side": null,
+        "width_px": 46.3,
+        "width_model_px": 52.69,
+        "rows_used": 40,
+        "beyond_fixed_limits_mm": 0.0
+      },
+      "橙": {
+        "reliable": true,
+        "reasons": [],
+        "method": "rod_band_both_edges",
+        "occluded_side": null,
+        "width_px": 40.6,
+        "width_model_px": 43.14,
+        "rows_used": 40,
+        "beyond_fixed_limits_mm": 0.0
+      }
+    },
+    "rail_observation": {
+      "endpoints_px": [
+        [
+          462.64,
+          317.63
+        ],
+        [
+          677.23,
+          400.68
+        ]
+      ],
+      "rail_line": {
+        "k": 0.386998,
+        "m": 138.59,
+        "source": "fitted"
+      },
+      "limits_source": "fixed_model",
+      "calibration": {
+        "name": "known_world_checkerboard_candidate",
+        "image_size_px": [
+          1920,
+          1080
+        ],
+        "C_world_mm": [
+          230.11437650326502,
+          98.55605488168251,
+          -98.18823749349983
+        ],
+        "distortion_model": "plumb_bob",
+        "pixels_are_undistorted": false,
+        "world_handedness": "left",
+        "world_coordinate_frame": "measured_world_x_reversed_20261117",
+        "plane_y_mm": 181.5,
+        "rail_lip_y_mm": 172.5,
+        "intrinsics_device": "/dev/video31",
+        "intrinsics_sensor": "m01_f_imx415 4-001a / rkisp1-vir0",
+        "intrinsics_source_sha256": "5b64b25da2d103167058a41fe15cf6259c6d9087cf0fd8b3cb0577d79c18562e",
+        "is_approximate": true,
+        "source": "known_world_checkerboard_fixed_intrinsics",
+        "validation_status": "reprojection_only_independent_world_validation_required",
+        "K": [
+          [
+            704.2315207501406,
+            0.0,
+            950.9108069588113
+          ],
+          [
+            0.0,
+            700.8145421326399,
+            463.000307663954
+          ],
+          [
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "D": [
+          0.09732725405832797,
+          -0.1614774641518489,
+          -0.015191157430943193,
+          -0.003816600672756129,
+          0.07199530637816304
+        ],
+        "R_world_from_camera": [
+          [
+            -0.00831517341890216,
+            -0.04000594887786535,
+            -0.999164842228446
+          ],
+          [
+            -0.9999373368592216,
+            -0.007156947774859545,
+            0.008608162024235535
+          ],
+          [
+            0.007495348284178713,
+            -0.9991738097813261,
+            0.03994393071756086
+          ]
+        ],
+        "pixel_coordinate_frame": "scene_upright",
+        "assumptions": []
+      },
+      "world_to_model": {
+        "world_coordinate_frame": "measured_world_x_reversed_20261117",
+        "shoulder_global_xyz_mm": [
+          65.0,
+          26.5,
+          -64.5
+        ],
+        "axis_signs": [
+          -1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "endpoint_diagnostic": {
+        "status": "accepted",
+        "reason": "ok",
+        "position_tolerance_mm": 2.5,
+        "endpoints_x_mm": [
+          -58.28103047859787,
+          22.69486561399097
+        ],
+        "span_mm": 80.97589609258884,
+        "allowed_span_mm": [
+          72.0,
+          90.0
+        ],
+        "candidate_limits_x_mm": {
+          "蓝": [
+            -49.28103047859787,
+            -1.8051343860090299
+          ],
+          "橙": [
+            -33.78103047859787,
+            13.69486561399097
+          ]
+        },
+        "outside_by_mm": {
+          "蓝": 0.0,
+          "橙": 0.0
+        }
+      }
+    },
+    "stamp_monotonic_s": null,
+    "approximate": true
+  },
+  "sliders": {
+    "blue": {
+      "color": "蓝",
+      "reference_world_x_mm": 105.0,
+      "detected_world_x_mm": 102.0145680058724,
+      "error_world_x_mm": -2.9854319941275946,
+      "world_xyz_mm": [
+        102.0145680058724,
+        181.5,
+        -70.47019592920019
+      ],
+      "arm_xyz_mm": [
+        -37.014568005872405,
+        155.0,
+        -5.970195929200187
+      ],
+      "previous_world_x_mm": 99.80071093691873,
+      "previous_error_world_x_mm": -5.199289063081267,
+      "pixel_xy_upright": [
+        494.35,
+        329.9
+      ],
+      "pixel_xy_sensor_raw": [
+        1424.65,
+        749.1
+      ],
+      "independent_sensor_raw_world_xyz_mm": [
+        102.01456800585464,
+        181.5,
+        -70.47019592920803
+      ],
+      "independent_ray_difference_mm": 1.7763568394002505e-11,
+      "detector_reliable": true,
+      "task_reliable": true,
+      "task_reasons": []
+    },
+    "yellow": {
+      "color": "橙",
+      "reference_world_x_mm": 75.0,
+      "detected_world_x_mm": 72.56761207442298,
+      "error_world_x_mm": -2.432387925577018,
+      "world_xyz_mm": [
+        72.56761207442298,
+        181.5,
+        -71.0563838996076
+      ],
+      "arm_xyz_mm": [
+        -7.567612074422982,
+        155.0,
+        -6.556383899607596
+      ],
+      "previous_world_x_mm": 70.29140774028923,
+      "previous_error_world_x_mm": -4.70859225971077,
+      "pixel_xy_upright": [
+        581.3,
+        363.55
+      ],
+      "pixel_xy_sensor_raw": [
+        1337.7,
+        715.45
+      ],
+      "independent_sensor_raw_world_xyz_mm": [
+        72.56761207438214,
+        181.5,
+        -71.05638389961635
+      ],
+      "independent_ray_difference_mm": 4.084199645149056e-11,
+      "detector_reliable": true,
+      "task_reliable": true,
+      "task_reasons": []
+    }
+  }
+}

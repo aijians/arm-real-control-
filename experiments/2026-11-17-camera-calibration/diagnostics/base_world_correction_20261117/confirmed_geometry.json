@@ -1,0 +1,49 @@
+{
+  "user_confirmed_shoulder_world_xyz_mm": [
+    65.0,
+    26.5,
+    -64.8
+  ],
+  "previous_latest_offline_shoulder_world_xyz_mm": [
+    65.0,
+    26.5,
+    -64.5
+  ],
+  "earliest_user_drawing_shoulder_z_mm": -27.5,
+  "user_confirmed_world_handedness": "left",
+  "user_confirmed_world_directions": {
+    "positive_X": "橙色滑杆指向蓝色滑杆",
+    "positive_Y": "基点朝向导轨的垂直方向",
+    "positive_Z": "竖直向上"
+  },
+  "arm_model_frame_unchanged": true,
+  "world_to_model_axis_signs": [
+    -1,
+    1,
+    1
+  ],
+  "world_to_model_formulas": [
+    "x_arm=65-X_world",
+    "y_arm=Y_world-26.5",
+    "z_arm=Z_world+64.8"
+  ],
+  "old_drawing_to_corrected_base_z_delta_mm": -37.3,
+  "latest_offline_to_corrected_base_z_delta_mm": -0.3,
+  "local_z_delta_mm": 0.3,
+  "world_positions_and_reprojection_errors_unchanged": true,
+  "X_Y_and_existing_planar_push_targets_unchanged": true,
+  "camera_intrinsics_and_world_extrinsics_unchanged": true,
+  "previous_candidate_selection_still_0": true,
+  "previous_six_point_X_MAE_mm": 1.9802179475101813,
+  "previous_six_point_max_abs_X_error_mm": 2.5953543809540918,
+  "source_sha256": {
+    "diagnostics/new_extrinsics_v3_photo_test_20261117/used_vision_config.json": "3bdd636ce1dea5e7db9da908bee05b4912f02e71111e0500d1068886ed82d7f2",
+    "diagnostics/new_extrinsics_v3_photo_test_20261117/provided_camera_world_sensor_raw.json": "3ecf24c5aa3af9f6b754c694ec7909ac2877a8cdfa0ed2e771770997d69cb0df",
+    "diagnostics/new_extrinsics_v3_photo_test_20261117/result_0001.json": "e8f392e1fd50587cb5b88fd5371760c5cc56d81af5a5e27d055a7fa76cf61946",
+    "diagnostics/new_extrinsics_v3_photo_test_20261117/result_0002.json": "f145ba8eaa407a24c40c41a907a488bba677c8694159aca57a4e1bae35ca9761",
+    "diagnostics/new_extrinsics_v3_photo_test_20261117/result_0005.json": "f9518989d90b9417c739dd4673899278bd0fa4844f1925a3b7770ee053e5070f"
+  },
+  "previous_reports_preserved": true,
+  "production_or_board_modified": false,
+  "live_camera_or_UART_opened": false
+}

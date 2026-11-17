@@ -1,0 +1,115 @@
+{
+  "profile": "real",
+  "already_rotated": false,
+  "rail_model_y_mm": 155.0,
+  "rail_y_tolerance_mm": 0.01,
+  "calibration": {
+    "name": "measured_world_x_reversed_20261117_nominal_upright",
+    "image_size_px": [
+      1920,
+      1080
+    ],
+    "K": [
+      [
+        698.5891449464962,
+        0.0,
+        958.1336762737473
+      ],
+      [
+        0.0,
+        698.2399519207177,
+        511.3468538175862
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "D": [
+      0.05322918059115373,
+      -0.06375883808099647,
+      -8.002273224807077e-05,
+      -0.0011399378118325647,
+      0.015484807643491312
+    ],
+    "distortion_model": "plumb_bob",
+    "pixels_are_undistorted": false,
+    "pixel_coordinate_frame": "scene_upright",
+    "intrinsics_origin_device": "/dev/video22",
+    "intrinsics_target_device": "/dev/video31",
+    "intrinsics_transfer_unverified": true,
+    "intrinsics_rms_px": 0.5077611957595818,
+    "intrinsics_sample_count": 41,
+    "C_world_mm": [
+      228.99,
+      97.0,
+      -104.22
+    ],
+    "R_world_from_camera": [
+      [
+        0.0,
+        0.0,
+        -1.0
+      ],
+      [
+        -1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        -1.0,
+        0.0
+      ]
+    ],
+    "plane_y_mm": 181.5,
+    "rail_lip_y_mm": 172.5,
+    "is_approximate": true,
+    "source": "2026-11-17用户实测及文字更正；仅世界X反向，Y/Z不变；物理相机倒装180，像素先转正一次；名义轴向矩阵，未用录像拟合安装角",
+    "assumptions": [
+      "K/D保留原标定并按180转正；跨相机内参误差尚未独立认证",
+      "世界X反向产生左手系；R为正交坐标基变换(det=-1)，非物理旋转",
+      "导轨轴心平面Y=181.5；前挡边沿用轴心前9mm，即Y=172.5，未重新量测",
+      "名义相机方向按安装约束；需要录像及独立物理参考验证实际偏角"
+    ],
+    "world_handedness": "left",
+    "world_coordinate_frame": "measured_world_x_reversed_20261117_z_up"
+  },
+  "rail_z_mm": null,
+  "capture_timeout_s": 20.0,
+  "max_frame_age_s": 3.0,
+  "camera_device": "/dev/video31",
+  "width": 1920,
+  "height": 1080,
+  "fps": 30,
+  "warmup_seconds": 2.0,
+  "warmup_frames": 30,
+  "eos_timeout_s": 8.0,
+  "bitrate": 8000000,
+  "rail_geometry": {
+    "center_inset_mm": 9.0,
+    "occupied_end_clearance_mm": 15.5
+  },
+  "fixed_slider_limits_x_mm": {
+    "蓝": [
+      -48.5,
+      -4.0
+    ],
+    "橙": [
+      -33.0,
+      11.5
+    ]
+  },
+  "beyond_stop_tolerance_mm": 2.5,
+  "shoulder_global_xyz_mm": [
+    65.0,
+    26.5,
+    -64.5
+  ],
+  "world_to_model_axis_signs": [
+    -1,
+    1,
+    1
+  ]
+}

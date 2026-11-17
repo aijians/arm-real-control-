@@ -1,0 +1,47 @@
+{
+  "source": "/home/aijians/下载/session_20260510_222231_76459ec8.zip",
+  "sha256": "0667e9f15e4abf2f4285b2d1b6e64f986ffcbd4b6cc620c3939822f0420b3b1f",
+  "zip_crc_pass": true,
+  "files": {
+    "session_20260510_222231_76459ec8/photo_0001_d1a0377e.png": {
+      "bytes": 2706893,
+      "sha256": "697e3e0d9909efa852b3dbd42e09bc47fc29c80d839e6307aa3fafeb5476f110"
+    },
+    "session_20260510_222231_76459ec8/photo_0001_d1a0377e.json": {
+      "bytes": 1209,
+      "sha256": "484c7d37c7be0397086c04044a4fd100e379e36171b2a80e4428fa66bf2231e8"
+    },
+    "session_20260510_222231_76459ec8/photo_0002_57239ffd.png": {
+      "bytes": 2641987,
+      "sha256": "e9b07a6484e1bf98bbbdc470b620fc9bf19a5204b2adf91d8525c3952d251c72"
+    },
+    "session_20260510_222231_76459ec8/photo_0002_57239ffd.json": {
+      "bytes": 1209,
+      "sha256": "8bb714318c917c28d18d9f06deea749a353a6725bcab666a2debf1ea310ec25f"
+    },
+    "session_20260510_222231_76459ec8/photo_0003_bacd5dc7.png": {
+      "bytes": 2703887,
+      "sha256": "eafcc8665d490d35958dc275d52f198b91832e6e4bc2aa25653d755d733579e6"
+    },
+    "session_20260510_222231_76459ec8/photo_0003_bacd5dc7.json": {
+      "bytes": 1206,
+      "sha256": "f0168e9c4b6c5183ecaf0722417b9e5995a56d44933357c31c7a0af862ecb31d"
+    },
+    "session_20260510_222231_76459ec8/photo_0004_79e9043f.png": {
+      "bytes": 2667330,
+      "sha256": "751991d51417ae5e0672c64828cf4991d317e93a943b7377ecb2d5537f8b9f64"
+    },
+    "session_20260510_222231_76459ec8/photo_0004_79e9043f.json": {
+      "bytes": 1207,
+      "sha256": "4f1bcea78609b34b52f1fe67b7973728342b0d6cba7982da0b75fac1b74971d1"
+    },
+    "session_20260510_222231_76459ec8/photo_0005_ce285e3d.png": {
+      "bytes": 2594344,
+      "sha256": "294d000bb72256181234ecf8e5f2b16b075ce02d2ee71b70bad982a6d10b439d"
+    },
+    "session_20260510_222231_76459ec8/photo_0005_ce285e3d.json": {
+      "bytes": 1207,
+      "sha256": "8d3055c7e67171382d4470eabf0e2bbcb89aad74841dd411e41e84450ca5c18b"
+    }
+  }
+}

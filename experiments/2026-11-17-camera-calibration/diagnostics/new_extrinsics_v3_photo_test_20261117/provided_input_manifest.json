@@ -1,0 +1,17 @@
+{
+  "provided_extrinsics.json": {
+    "source_path": "/home/aijians/下载/extrinsics.json",
+    "sha256": "2b3fab147e7b74309a392844ee479610cedf68967971833b6d1c406e3cbc5686",
+    "bytes": 26636
+  },
+  "provided_camera_world_sensor_raw.json": {
+    "source_path": "/home/aijians/下载/camera_world_sensor_raw.json",
+    "sha256": "3ecf24c5aa3af9f6b754c694ec7909ac2877a8cdfa0ed2e771770997d69cb0df",
+    "bytes": 1470
+  },
+  "provided_intrinsics.json": {
+    "source_path": "/home/aijians/文档/ChatGPT/space/diagnostics/intrinsics_v3_review_20261117/provided_calibration_v3.json",
+    "sha256": "c79b71c47d790c6f1fc68ab29819366aefd5b82a5b138bd35e6bcbb426a7fa36",
+    "bytes": 2779
+  }
+}

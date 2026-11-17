@@ -1,0 +1,362 @@
+{
+  "groups": [
+    {
+      "group": "intrinsics_v2",
+      "remote_source": "/var/lib/camera-calibration-video22/20260510T170657Z_b0a8ad",
+      "files": [
+        {
+          "file": "calibration.json",
+          "bytes": 2633,
+          "sha256": "5ace532d4602280e099f0eb594bd6d325bd7754749cc276cb586fab1ee5bb534"
+        },
+        {
+          "file": "samples.json",
+          "bytes": 115491,
+          "sha256": "c6801961aef3e3417484d1ea6dcd6369f4baaffadd4bc1279484b7a6277e8854"
+        },
+        {
+          "file": "sample_001.png",
+          "bytes": 3085601,
+          "sha256": "5796eed09e9594db1fa08bb78d3421f791af3336d55fae3c856115d9e5a3de83"
+        },
+        {
+          "file": "sample_002.png",
+          "bytes": 2890085,
+          "sha256": "0b2307fc3f4d944ed69113e75dd6becfbfedeb9e8fe44c3d80413791dbab4870"
+        },
+        {
+          "file": "sample_003.png",
+          "bytes": 2664524,
+          "sha256": "7cb8be190c26278528c2a2b23e0f6d12b1d7447093972efdc32da9d8605cc81c"
+        },
+        {
+          "file": "sample_004.png",
+          "bytes": 2764737,
+          "sha256": "881b913eb3c9781a02b80e2d88a2dae4ca5d4dacda6da3e43a8c6a24e46318c0"
+        },
+        {
+          "file": "sample_005.png",
+          "bytes": 2785154,
+          "sha256": "ddfe12198b004d45fe7bb0087e37ca4f9c39c146158bf0372099374012f74ed6"
+        },
+        {
+          "file": "sample_006.png",
+          "bytes": 2854881,
+          "sha256": "dbcbf633a0588a56784fa33acef8172c9545cf95273d627adedf0a8d1e2efa1a"
+        },
+        {
+          "file": "sample_007.png",
+          "bytes": 2895699,
+          "sha256": "6197a4c94d0f656823b5cebfabc8273834d2b217989ee0331c72c12b863680da"
+        },
+        {
+          "file": "sample_008.png",
+          "bytes": 2908919,
+          "sha256": "24bf6a1f4ab23cae1e986c9db4badbe95a3ee3d6c4f3f809b3d549deab28eb3d"
+        },
+        {
+          "file": "sample_009.png",
+          "bytes": 3132926,
+          "sha256": "a02c3857382cbcaa8e01c88fa8e648be240755de94d505c415e16c546fd6fdfa"
+        },
+        {
+          "file": "sample_010.png",
+          "bytes": 3144698,
+          "sha256": "faebbbb73c0145ad3468456c25db94f868c74a0d72af983ea5c8465c69c1a45a"
+        },
+        {
+          "file": "sample_011.png",
+          "bytes": 3121338,
+          "sha256": "ad20440a2d5f5f07d42137085f71f73d98712afa0a04ea7a57d10ec472952c94"
+        },
+        {
+          "file": "sample_012.png",
+          "bytes": 3070044,
+          "sha256": "71a077023b078bc847422470519863a8f30f48ad12efbaf1cce6159713a6a767"
+        },
+        {
+          "file": "sample_013.png",
+          "bytes": 3064717,
+          "sha256": "5706e32633d1e6b619e071dc1ff49f74ab9b069940c953a7c7e249939d2e7a98"
+        },
+        {
+          "file": "sample_014.png",
+          "bytes": 3121259,
+          "sha256": "8242399f81124bc29d00654f2c0791690a11151ada4d2471b1433509e43e829a"
+        },
+        {
+          "file": "sample_015.png",
+          "bytes": 3103189,
+          "sha256": "dcce2d9d7683e73d6f5c7553fd14aa44e8ded8ce2b539e50ce7c8e5e1786c8e9"
+        },
+        {
+          "file": "sample_016.png",
+          "bytes": 2945042,
+          "sha256": "b0145da7f308757f1213cae0cda263ead1642ee3dd1277529b4376fc8b29a278"
+        },
+        {
+          "file": "sample_017.png",
+          "bytes": 2805142,
+          "sha256": "2daa83df5986dc00deee9f7a6bae7ca6ad0f23015ad4303bd647a24df9bb5dad"
+        },
+        {
+          "file": "sample_018.png",
+          "bytes": 2877512,
+          "sha256": "38dfd42287fe6356dbbfd8bb3bd8acd3d1f55fed3ad704240920ca6751736206"
+        },
+        {
+          "file": "sample_019.png",
+          "bytes": 3079887,
+          "sha256": "7338a7926370a1dc65bc791b6ddf07bd3944ba861ee659ba5bb0cebcb429bcb3"
+        },
+        {
+          "file": "sample_020.png",
+          "bytes": 3085710,
+          "sha256": "81e974ff2c7e80f738a255af0ed886cbe4d9abc61c5b251d10b77ccc4b8c87cc"
+        },
+        {
+          "file": "sample_021.png",
+          "bytes": 2947211,
+          "sha256": "511c2f3b0a79dfc4d63633252d05e83a36b3aecef4888df1e07762e4538de081"
+        },
+        {
+          "file": "sample_022.png",
+          "bytes": 2959272,
+          "sha256": "49c3b9d3fb6c6980ed795cd62025d038206298fcdee96179488036fd1feb8285"
+        },
+        {
+          "file": "sample_023.png",
+          "bytes": 3154937,
+          "sha256": "ce8a3088beea573833f5561bef3c1400e6a851dd786beeeadec1450431c213d2"
+        },
+        {
+          "file": "sample_024.png",
+          "bytes": 3077167,
+          "sha256": "1e0a79af40ae87ff378ddf70e4742cf06b0f0b58764b2ab3aac5de3589e7ffec"
+        },
+        {
+          "file": "sample_025.png",
+          "bytes": 2964528,
+          "sha256": "1578e6f5ef949acb4d42c79704a5044ccc59b5556025ff543b91cf877b28003c"
+        },
+        {
+          "file": "sample_026.png",
+          "bytes": 3025968,
+          "sha256": "1f89576e8af6aec9d4fe4f7cc30a5c789336977c5b0868ca52d2c98a325b43ef"
+        },
+        {
+          "file": "sample_027.png",
+          "bytes": 3174679,
+          "sha256": "75183f8fb00e0709bb93d371f76474c798e056eee60f639a7442618fa8e89908"
+        },
+        {
+          "file": "sample_028.png",
+          "bytes": 3184934,
+          "sha256": "6d4d8f2d689decc55972cbd1972c72fda292d8b8f127d687ff4ddebf6bb7f646"
+        },
+        {
+          "file": "sample_029.png",
+          "bytes": 2993895,
+          "sha256": "09c5a1df98cc67e92c72a6a4d1bb63365c386e106043cc78c00ba38a0b41725b"
+        },
+        {
+          "file": "sample_030.png",
+          "bytes": 3024273,
+          "sha256": "339280da32f5ef14e7a39adbd2eb0dea30dadd07e5130864400f65c6bb72ce4f"
+        }
+      ],
+      "metadata_unchanged": true,
+      "sample_count": 30
+    },
+    {
+      "group": "intrinsics_v3",
+      "remote_source": "/var/lib/camera-calibration-video22/20260510T171727Z_b1af0a",
+      "files": [
+        {
+          "file": "calibration.json",
+          "bytes": 2779,
+          "sha256": "c79b71c47d790c6f1fc68ab29819366aefd5b82a5b138bd35e6bcbb426a7fa36"
+        },
+        {
+          "file": "samples.json",
+          "bytes": 131209,
+          "sha256": "f95dcfddf34dd3d0400bdd879795b98facc8a0f9d36ce0ab99f65a083ae19ca2"
+        },
+        {
+          "file": "sample_001.png",
+          "bytes": 3113889,
+          "sha256": "c23876bbebdb16e1b16e9539f81b02fa86928562763d3c674fa214ece9dd53c6"
+        },
+        {
+          "file": "sample_002.png",
+          "bytes": 2992200,
+          "sha256": "730325fdc834bd7e939ea205225f602ea613886be2d48c4b5f3fa3be9218354b"
+        },
+        {
+          "file": "sample_003.png",
+          "bytes": 2831248,
+          "sha256": "f9efdc0bf786aa1e3b13612c93c678baace0e91219ecee5170727cc018dc0c6b"
+        },
+        {
+          "file": "sample_004.png",
+          "bytes": 3017441,
+          "sha256": "16a13b137445e64fb2fa74a7b31186bb9860ea361c4fcedc435cb5280f02181f"
+        },
+        {
+          "file": "sample_005.png",
+          "bytes": 3152670,
+          "sha256": "b0edd03eabbd9367b2abe5c488ac01059c59ed5c5fa2f5cf7949d1961b707989"
+        },
+        {
+          "file": "sample_006.png",
+          "bytes": 3208123,
+          "sha256": "4886e3ed1f111b0724640546717a07c6908f81f9dac3c40a6171e0332abc9817"
+        },
+        {
+          "file": "sample_007.png",
+          "bytes": 3256567,
+          "sha256": "ddb4f1784219d915ee833c200549fee05e295fa6253a5608c1b83c25227ca9ff"
+        },
+        {
+          "file": "sample_008.png",
+          "bytes": 3349364,
+          "sha256": "9da05a80ad905e225be6b41eb521cb10022f37b2cdee880dcb57c3657a89965b"
+        },
+        {
+          "file": "sample_009.png",
+          "bytes": 3167442,
+          "sha256": "4cd1988b7ea3bfa4d48343912a72fdc7850a6daed8042f87946f35c14c4ac2e1"
+        },
+        {
+          "file": "sample_010.png",
+          "bytes": 3019768,
+          "sha256": "12e7c9176899f82d847d4ffab3f564b5e8b4f7518375ada37c21f5f6d6f194e1"
+        },
+        {
+          "file": "sample_011.png",
+          "bytes": 3272120,
+          "sha256": "5f4a2193d4850bf7db4d830890ae079b360d6b9d5fd77b1ab4ca04530bafb604"
+        },
+        {
+          "file": "sample_012.png",
+          "bytes": 3120183,
+          "sha256": "4d03bc0808d351f4744bcfaeb2e9d3685b78733c5d631b738cb319d84a828ee8"
+        },
+        {
+          "file": "sample_013.png",
+          "bytes": 3187740,
+          "sha256": "dd782ad4a4e789d6f23f9c69985bee24a5cf4dec701d41496811841881cd3a73"
+        },
+        {
+          "file": "sample_014.png",
+          "bytes": 3213770,
+          "sha256": "d8831ca4ac506897dfd2442ffcac63e68f736963da073936465b57e97f378d0a"
+        },
+        {
+          "file": "sample_015.png",
+          "bytes": 2995096,
+          "sha256": "34d550855a52805f1d6255053d00e287c9f9e0d6ad0c8cffa6d5211e352a056b"
+        },
+        {
+          "file": "sample_016.png",
+          "bytes": 3098124,
+          "sha256": "e3192f4859c4eb3c8b64084c5317f861d32d3e54a6a90772bd0105cb2201d92c"
+        },
+        {
+          "file": "sample_017.png",
+          "bytes": 3242604,
+          "sha256": "f79e9303d3c66ae60ce14864725941104fcd5cc646b229a9a28a1cfc6e64e8d8"
+        },
+        {
+          "file": "sample_018.png",
+          "bytes": 3179798,
+          "sha256": "e3b574c5192420e63e4eaa7b70a1ac5c270c832006710b277a720823cd2e59e6"
+        },
+        {
+          "file": "sample_019.png",
+          "bytes": 3096738,
+          "sha256": "6597af17410305678830f5a69847a34600a648f925061f760ca9fea8ea35487a"
+        },
+        {
+          "file": "sample_020.png",
+          "bytes": 2960927,
+          "sha256": "0aa366db21e9fce6176839140c720c8d85bd37a44def860b60de68ad144f5838"
+        },
+        {
+          "file": "sample_021.png",
+          "bytes": 2944025,
+          "sha256": "8766b00b5f8b3578793dd1aa52bfc30d52251f9e9ec7287b73bfbf9f7bb208b4"
+        },
+        {
+          "file": "sample_022.png",
+          "bytes": 3062756,
+          "sha256": "7713c3c54429a10e60a444cdb4ee78cf3bab761359b64e2a0a54ab7fbf4756cb"
+        },
+        {
+          "file": "sample_023.png",
+          "bytes": 2964675,
+          "sha256": "4b43d14ace89af2a1cf824283dd858fee9a30fc9449fc5aff663c2e96cf423eb"
+        },
+        {
+          "file": "sample_024.png",
+          "bytes": 3147023,
+          "sha256": "468ebf2d60be5c828e06cace857876f2baaa40b80692c4ec948b11e41c024eae"
+        },
+        {
+          "file": "sample_025.png",
+          "bytes": 3221568,
+          "sha256": "cefe50326d6774afcabf001ef7b2aa1bbc8bd0834e79d727f516ce2e6e153e4f"
+        },
+        {
+          "file": "sample_026.png",
+          "bytes": 3132120,
+          "sha256": "e7760c6d6e7709d9a751525704660b7d2f3c87e8251784e644d55bd2245e8548"
+        },
+        {
+          "file": "sample_027.png",
+          "bytes": 3262562,
+          "sha256": "168b2d208b4ec29aef419b96204fb1164f5a6b3cb9d723eb2ea9cdff7ab2e4de"
+        },
+        {
+          "file": "sample_028.png",
+          "bytes": 3227959,
+          "sha256": "da930e0150a612c65e497dc190ae4c8a718125fbca1f9f15c8b134b9386fd437"
+        },
+        {
+          "file": "sample_029.png",
+          "bytes": 3116374,
+          "sha256": "ca3c0a15c9fb671582b09c98dc11ef0629f4f15cd0e828dbf6dcabd11222e8c7"
+        },
+        {
+          "file": "sample_030.png",
+          "bytes": 3060110,
+          "sha256": "b51b9d28bbdf56f346a90eac2fcd7a15a881a380bff4fab4d5ee6f2fffa99055"
+        },
+        {
+          "file": "sample_031.png",
+          "bytes": 3258809,
+          "sha256": "4edfb76691868d8af6e51a0a8a85d74a314f921af563ff60b30710e82e732916"
+        },
+        {
+          "file": "sample_032.png",
+          "bytes": 3149557,
+          "sha256": "b1fca19ea783d38521c6b17bec2d816f510c2767f5cdd82d007d0fb08c737df0"
+        },
+        {
+          "file": "sample_033.png",
+          "bytes": 3138505,
+          "sha256": "1c853f336b82c0486782bd11fd8549d598d1e96be68ddf4c586e96919fac64ca"
+        },
+        {
+          "file": "sample_034.png",
+          "bytes": 3057951,
+          "sha256": "5d0445fd4cade27668bcbab9b8bf8fe909854dbd2e21bc50629294bd690a7249"
+        }
+      ],
+      "metadata_unchanged": true,
+      "sample_count": 34
+    }
+  ],
+  "readonly": true,
+  "camera_opened": false
+}

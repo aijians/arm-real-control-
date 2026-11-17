@@ -1,0 +1,118 @@
+{
+  "camera_matrix": [
+    [
+      704.2315207501406,
+      0.0,
+      968.0891930411887
+    ],
+    [
+      0.0,
+      700.8145421326399,
+      615.999692336046
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "distortion_coefficients": [
+    0.09732725405832797,
+    -0.1614774641518489,
+    0.015191157430943193,
+    0.003816600672756129,
+    0.07199530637816304
+  ],
+  "distortion_model": "plumb_bob",
+  "rms_px": 0.3440429924154908,
+  "per_image_rms_px": [
+    0.2548154592514038,
+    0.17671625316143036,
+    0.23640261590480804,
+    0.25656160712242126,
+    0.2857987582683563,
+    0.24297656118869781,
+    0.2955538332462311,
+    0.3654366135597229,
+    0.25471246242523193,
+    0.3040222227573395,
+    0.24760422110557556,
+    0.3040030896663666,
+    0.18452496826648712,
+    0.23947353661060333,
+    0.21558019518852234,
+    0.16807109117507935,
+    0.21977069973945618,
+    1.2683862447738647,
+    0.1654621958732605,
+    0.15485168993473053,
+    0.26986682415008545,
+    0.5053994655609131,
+    0.23251506686210632,
+    0.1657501608133316,
+    0.17622509598731995,
+    0.16150175034999847,
+    0.2864131033420563,
+    0.30267268419265747,
+    0.3299250602722168,
+    0.19096384942531586
+  ],
+  "coverage_cells": [
+    4,
+    6,
+    7,
+    8
+  ],
+  "warnings": [
+    "棋盘中心覆盖少于5个九宫格区域，建议补拍画面四周"
+  ],
+  "sample_count": 30,
+  "image_width": 1920,
+  "image_height": 1080,
+  "quality": "needs_review",
+  "pixel_coordinate_frame": "sensor_raw",
+  "pixels_are_undistorted": false,
+  "board": {
+    "cols": 8,
+    "rows": 6,
+    "square_mm": 6.0
+  },
+  "extrinsics_note": "每张棋盘位姿相对于相机；不是全局坐标系外参",
+  "device": "/dev/video31",
+  "sensor": "m01_f_imx415 4-001a / rkisp1-vir0",
+  "created_utc": "2026-05-10T17:21:24.227120+00:00",
+  "files": [
+    "sample_001.png",
+    "sample_002.png",
+    "sample_003.png",
+    "sample_004.png",
+    "sample_005.png",
+    "sample_006.png",
+    "sample_007.png",
+    "sample_008.png",
+    "sample_009.png",
+    "sample_010.png",
+    "sample_011.png",
+    "sample_012.png",
+    "sample_013.png",
+    "sample_014.png",
+    "sample_015.png",
+    "sample_016.png",
+    "sample_017.png",
+    "sample_018.png",
+    "sample_019.png",
+    "sample_020.png",
+    "sample_021.png",
+    "sample_022.png",
+    "sample_023.png",
+    "sample_024.png",
+    "sample_025.png",
+    "sample_026.png",
+    "sample_027.png",
+    "sample_028.png",
+    "sample_029.png",
+    "sample_030.png"
+  ],
+  "coordinate_units": "intrinsic pixels; board translations mm",
+  "applicability": "This physical camera and capture mode only"
+}

@@ -1,0 +1,32 @@
+{
+  "uploaded_v3_canonical_sha256": "1c35c6b1442560432b289c8f92abd69504aae2d554767af1c2f4da0ce8ad73e5",
+  "referenced_source_sha256": "0912d6aeed8fb04c84ade5cf29008c8971d70895320e1c73ab58b4e0d1636ba3",
+  "candidates": [
+    {
+      "path": "/var/lib/camera-calibration-video22/20260507T174645Z_a528a2/calibration.json",
+      "bytes": 2990,
+      "raw_sha256": "d2e8dc6748233953fa44c621b0971e89047825a7921ece71338a7af3c899bece",
+      "canonical_sha256": "e75915f4c833bb64006cea1b819e79aa93beb60c71b9d45aecb415f5c74bcbc4",
+      "source_hash_matches": false,
+      "K_D_identical": false
+    },
+    {
+      "path": "/var/lib/camera-calibration-video22/20260510T171727Z_b1af0a/calibration.json",
+      "bytes": 2779,
+      "raw_sha256": "c79b71c47d790c6f1fc68ab29819366aefd5b82a5b138bd35e6bcbb426a7fa36",
+      "canonical_sha256": "1c35c6b1442560432b289c8f92abd69504aae2d554767af1c2f4da0ce8ad73e5",
+      "source_hash_matches": false,
+      "K_D_identical": true,
+      "differences_vs_uploaded_v3": {},
+      "local_copy": "board_evidence/source_20260510T171727Z_b1af0a_calibration.json"
+    },
+    {
+      "path": "/var/lib/camera-calibration-video22/20260510T170657Z_b0a8ad/calibration.json",
+      "bytes": 2633,
+      "raw_sha256": "5ace532d4602280e099f0eb594bd6d325bd7754749cc276cb586fab1ee5bb534",
+      "canonical_sha256": "5b64b25da2d103167058a41fe15cf6259c6d9087cf0fd8b3cb0577d79c18562e",
+      "source_hash_matches": false,
+      "K_D_identical": false
+    }
+  ]
+}

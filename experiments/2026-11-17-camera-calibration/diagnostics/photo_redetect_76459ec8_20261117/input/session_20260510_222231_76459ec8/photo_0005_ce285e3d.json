@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "image": "photo_0005_ce285e3d.png",
+  "scene": "ground",
+  "label": "其他状态",
+  "note": "世界坐标x橙：75，蓝;105",
+  "image_size_px": [
+    1920,
+    1080
+  ],
+  "pixel_coordinate_frame": "sensor_raw",
+  "saved_image_rotation_deg": 0,
+  "preview_rotation_deg": 0,
+  "saved_at_utc": "2026-05-10T14:29:06.457054+00:00",
+  "clock_note": "UTC来自开发板系统时钟；帧接收时间来自单调时钟，不代表硬件曝光时间",
+  "capture_requested_monotonic_s": 4327.772672072,
+  "received_monotonic_s": 4327.785265656,
+  "pipeline_pts_ns": 389853058818,
+  "sequence": 6577,
+  "device": "/dev/video31",
+  "reference_geometry": {
+    "source": "用户填写的参考数据，程序未自动测量",
+    "units": "mm",
+    "rail_slot_length_mm": 80.0,
+    "expected_center_distance_mm": null,
+    "camera_world_xyz_mm": [
+      24.5,
+      99.0,
+      -108.0
+    ],
+    "shoulder_global_xy_mm": [
+      189.3,
+      28.5
+    ],
+    "shaft_plane_global_y_mm": 183.5,
+    "front_lip_global_y_mm": 174.5,
+    "world_z_zero": "箱体上沿",
+    "world_positive_z": "向上"
+  },
+  "sha256_png": "294d000bb72256181234ecf8e5f2b16b075ce02d2ee71b70bad982a6d10b439d"
+}

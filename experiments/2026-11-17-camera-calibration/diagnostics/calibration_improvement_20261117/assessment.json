@@ -1,0 +1,50 @@
+{
+  "scope": "Offline reasoning, no parameter fitting or hardware changes",
+  "current_code_thresholds": {
+    "general_position_tolerance_mm": 0.5,
+    "endpoint_under_over_mm": [
+      2.5,
+      1.0
+    ],
+    "beyond_physical_stop_mm": 2.5,
+    "precontact_minus_x_mm": 2.0
+  },
+  "ray_plane_Y_sensitivity": [
+    {
+      "photo": "0001",
+      "color": "blue",
+      "d_world_X_d_plane_Y": -1.441891447984727
+    },
+    {
+      "photo": "0001",
+      "color": "yellow",
+      "d_world_X_d_plane_Y": -2.0720565877547164
+    },
+    {
+      "photo": "0002",
+      "color": "blue",
+      "d_world_X_d_plane_Y": -1.4352937458344575
+    },
+    {
+      "photo": "0002",
+      "color": "yellow",
+      "d_world_X_d_plane_Y": -1.830567726960899
+    },
+    {
+      "photo": "0005",
+      "color": "blue",
+      "d_world_X_d_plane_Y": -1.5444142223360777
+    },
+    {
+      "photo": "0005",
+      "color": "yellow",
+      "d_world_X_d_plane_Y": -1.899436591834467
+    }
+  ],
+  "print_scale_example": {
+    "assumed_uniform_scale_error_fraction": 0.01,
+    "illustrative_camera_board_distance_mm": 180,
+    "illustrative_translation_scale_mm": 1.8
+  },
+  "note": "Sensitivities are conditional on other calibration parameters held fixed, not a diagnosis or fitted correction"
+}

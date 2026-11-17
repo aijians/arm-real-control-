@@ -1,0 +1,466 @@
+{
+  "image": "photo_0005_ce285e3d.png",
+  "reference_note": "世界坐标x橙：75，蓝;105",
+  "source_image_sha256": "294d000bb72256181234ecf8e5f2b16b075ce02d2ee71b70bad982a6d10b439d",
+  "rotation_equivalence": true,
+  "ground_real_pixel_identical": true,
+  "reference_source": "User-entered world X values in per-image metadata notes; not auto measured.",
+  "metadata_reference_geometry_overridden": true,
+  "pixels": {
+    "schema_version": 1,
+    "profile": "real",
+    "input_size_px": [
+      1920,
+      1080
+    ],
+    "status": "complete",
+    "position_definition": "shaft_axis_intersection_with_image_reference_line",
+    "rail_line": {
+      "k": 0.386998,
+      "m": 138.59,
+      "source": "fitted"
+    },
+    "rail_endpoints_px": [
+      [
+        462.64,
+        317.63
+      ],
+      [
+        677.23,
+        400.68
+      ]
+    ],
+    "sliders": {
+      "blue": {
+        "pixel_xy": [
+          494.35,
+          329.9
+        ],
+        "reference_method": "rod_band_both_edges",
+        "representative_part": "rod",
+        "approximate": false,
+        "reliable": true,
+        "reasons": [],
+        "measurement": {
+          "rows_in_band": 40,
+          "rows_used": 40,
+          "occluded_side": null,
+          "width_px": 46.3,
+          "width_model_px": 52.69,
+          "method": "rod_band_both_edges"
+        }
+      },
+      "yellow": {
+        "pixel_xy": [
+          581.3,
+          363.55
+        ],
+        "reference_method": "rod_band_both_edges",
+        "representative_part": "rod",
+        "approximate": false,
+        "reliable": true,
+        "reasons": [],
+        "measurement": {
+          "rows_in_band": 40,
+          "rows_used": 40,
+          "occluded_side": null,
+          "width_px": 40.6,
+          "width_model_px": 43.14,
+          "method": "rod_band_both_edges"
+        }
+      }
+    }
+  },
+  "world": {
+    "schema_version": 1,
+    "profile": "real",
+    "input_size_px": [
+      1920,
+      1080
+    ],
+    "status": "complete",
+    "units": "mm",
+    "coordinate_frame": "measured_world_x_reversed_20261117_z_up",
+    "world_handedness": "left",
+    "position_definition": "shaft_axis_reference_point",
+    "is_approximate": true,
+    "calibration": {
+      "name": "measured_world_x_reversed_20261117_nominal_upright",
+      "image_size_px": [
+        1920,
+        1080
+      ],
+      "K": [
+        [
+          698.5891449464962,
+          0.0,
+          958.1336762737473
+        ],
+        [
+          0.0,
+          698.2399519207177,
+          511.3468538175862
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "D": [
+        0.05322918059115373,
+        -0.06375883808099647,
+        -8.002273224807077e-05,
+        -0.0011399378118325647,
+        0.015484807643491312
+      ],
+      "distortion_model": "plumb_bob",
+      "pixels_are_undistorted": false,
+      "pixel_coordinate_frame": "scene_upright",
+      "intrinsics_origin_device": "/dev/video22",
+      "intrinsics_target_device": "/dev/video31",
+      "intrinsics_transfer_unverified": true,
+      "intrinsics_rms_px": 0.5077611957595818,
+      "intrinsics_sample_count": 41,
+      "C_world_mm": [
+        228.99,
+        97.0,
+        -104.22
+      ],
+      "R_world_from_camera": [
+        [
+          0.0,
+          0.0,
+          -1.0
+        ],
+        [
+          -1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          -1.0,
+          0.0
+        ]
+      ],
+      "plane_y_mm": 181.5,
+      "rail_lip_y_mm": 172.5,
+      "is_approximate": true,
+      "source": "2026-11-17用户实测及文字更正；仅世界X反向，Y/Z不变；物理相机倒装180，像素先转正一次；名义轴向矩阵，未用录像拟合安装角",
+      "assumptions": [
+        "K/D保留原标定并按180转正；跨相机内参误差尚未独立认证",
+        "世界X反向产生左手系；R为正交坐标基变换(det=-1)，非物理旋转",
+        "导轨轴心平面Y=181.5；前挡边沿用轴心前9mm，即Y=172.5，未重新量测",
+        "名义相机方向按安装约束；需要录像及独立物理参考验证实际偏角"
+      ],
+      "world_handedness": "left",
+      "world_coordinate_frame": "measured_world_x_reversed_20261117_z_up"
+    },
+    "distortion_handling": "opencv_undistortPointsIter_plumb_bob",
+    "rail_line_kb": null,
+    "rail_line_fallback": false,
+    "rail_endpoints_px": [
+      [
+        462.64,
+        317.63
+      ],
+      [
+        677.23,
+        400.68
+      ]
+    ],
+    "rail_endpoints": {
+      "left": {
+        "pixel_xy": [
+          462.64,
+          317.63
+        ],
+        "world_xyz_mm": [
+          120.93878883912261,
+          172.5,
+          -74.66601646138753
+        ],
+        "position_definition": "shaft_axis_reference_point",
+        "method": "pixel_ray_intersection_with_known_world_y_plane",
+        "units": "mm",
+        "coordinate_frame": "measured_world_x_reversed_20261117_z_up",
+        "world_handedness": "left",
+        "is_approximate": true
+      },
+      "right": {
+        "pixel_xy": [
+          677.23,
+          400.68
+        ],
+        "world_xyz_mm": [
+          39.504056236610495,
+          172.5,
+          -74.44786891953547
+        ],
+        "position_definition": "shaft_axis_reference_point",
+        "method": "pixel_ray_intersection_with_known_world_y_plane",
+        "units": "mm",
+        "coordinate_frame": "measured_world_x_reversed_20261117_z_up",
+        "world_handedness": "left",
+        "is_approximate": true
+      }
+    },
+    "sliders": {
+      "blue": {
+        "pixel_xy": [
+          494.35,
+          329.9
+        ],
+        "world_xyz_mm": [
+          99.80071093691873,
+          181.5,
+          -71.12137391240594
+        ],
+        "position_definition": "shaft_axis_reference_point",
+        "method": "pixel_ray_intersection_with_known_world_y_plane",
+        "units": "mm",
+        "coordinate_frame": "measured_world_x_reversed_20261117_z_up",
+        "world_handedness": "left",
+        "is_approximate": true,
+        "reference_method": "rod_band_both_edges",
+        "representative_part": "rod",
+        "approximate": false,
+        "reliable": true,
+        "reasons": []
+      },
+      "yellow": {
+        "pixel_xy": [
+          581.3,
+          363.55
+        ],
+        "world_xyz_mm": [
+          70.29140774028923,
+          181.5,
+          -71.04308382951929
+        ],
+        "position_definition": "shaft_axis_reference_point",
+        "method": "pixel_ray_intersection_with_known_world_y_plane",
+        "units": "mm",
+        "coordinate_frame": "measured_world_x_reversed_20261117_z_up",
+        "world_handedness": "left",
+        "is_approximate": true,
+        "reference_method": "rod_band_both_edges",
+        "representative_part": "rod",
+        "approximate": false,
+        "reliable": true,
+        "reasons": []
+      }
+    }
+  },
+  "task_observation": {
+    "sliders_x_mm": {
+      "橙": -5.29140774028923,
+      "蓝": -34.80071093691873
+    },
+    "slider_limits_x_mm": {
+      "蓝": [
+        -48.5,
+        -4.0
+      ],
+      "橙": [
+        -33.0,
+        11.5
+      ]
+    },
+    "reliability": {
+      "蓝": {
+        "reliable": true,
+        "reasons": [],
+        "method": "rod_band_both_edges",
+        "occluded_side": null,
+        "width_px": 46.3,
+        "width_model_px": 52.69,
+        "rows_used": 40,
+        "beyond_fixed_limits_mm": 0.0
+      },
+      "橙": {
+        "reliable": true,
+        "reasons": [],
+        "method": "rod_band_both_edges",
+        "occluded_side": null,
+        "width_px": 40.6,
+        "width_model_px": 43.14,
+        "rows_used": 40,
+        "beyond_fixed_limits_mm": 0.0
+      }
+    },
+    "rail_observation": {
+      "endpoints_px": [
+        [
+          462.64,
+          317.63
+        ],
+        [
+          677.23,
+          400.68
+        ]
+      ],
+      "rail_line": {
+        "k": 0.386998,
+        "m": 138.59,
+        "source": "fitted"
+      },
+      "limits_source": "fixed_model",
+      "calibration": {
+        "name": "measured_world_x_reversed_20261117_nominal_upright",
+        "image_size_px": [
+          1920,
+          1080
+        ],
+        "K": [
+          [
+            698.5891449464962,
+            0.0,
+            958.1336762737473
+          ],
+          [
+            0.0,
+            698.2399519207177,
+            511.3468538175862
+          ],
+          [
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "D": [
+          0.05322918059115373,
+          -0.06375883808099647,
+          -8.002273224807077e-05,
+          -0.0011399378118325647,
+          0.015484807643491312
+        ],
+        "distortion_model": "plumb_bob",
+        "pixels_are_undistorted": false,
+        "pixel_coordinate_frame": "scene_upright",
+        "intrinsics_origin_device": "/dev/video22",
+        "intrinsics_target_device": "/dev/video31",
+        "intrinsics_transfer_unverified": true,
+        "intrinsics_rms_px": 0.5077611957595818,
+        "intrinsics_sample_count": 41,
+        "C_world_mm": [
+          228.99,
+          97.0,
+          -104.22
+        ],
+        "R_world_from_camera": [
+          [
+            0.0,
+            0.0,
+            -1.0
+          ],
+          [
+            -1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            -1.0,
+            0.0
+          ]
+        ],
+        "plane_y_mm": 181.5,
+        "rail_lip_y_mm": 172.5,
+        "is_approximate": true,
+        "source": "2026-11-17用户实测及文字更正；仅世界X反向，Y/Z不变；物理相机倒装180，像素先转正一次；名义轴向矩阵，未用录像拟合安装角",
+        "assumptions": [
+          "K/D保留原标定并按180转正；跨相机内参误差尚未独立认证",
+          "世界X反向产生左手系；R为正交坐标基变换(det=-1)，非物理旋转",
+          "导轨轴心平面Y=181.5；前挡边沿用轴心前9mm，即Y=172.5，未重新量测",
+          "名义相机方向按安装约束；需要录像及独立物理参考验证实际偏角"
+        ],
+        "world_handedness": "left",
+        "world_coordinate_frame": "measured_world_x_reversed_20261117_z_up"
+      },
+      "world_to_model": {
+        "world_coordinate_frame": "measured_world_x_reversed_20261117_z_up",
+        "shoulder_global_xyz_mm": [
+          65.0,
+          26.5,
+          -64.5
+        ],
+        "axis_signs": [
+          -1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "endpoint_diagnostic": {
+        "status": "accepted",
+        "reason": "ok",
+        "position_tolerance_mm": 2.5,
+        "endpoints_x_mm": [
+          -55.93878883912261,
+          25.495943763389505
+        ],
+        "span_mm": 81.43473260251211,
+        "allowed_span_mm": [
+          72.0,
+          90.0
+        ],
+        "candidate_limits_x_mm": {
+          "蓝": [
+            -46.93878883912261,
+            0.995943763389505
+          ],
+          "橙": [
+            -31.43878883912261,
+            16.495943763389505
+          ]
+        },
+        "outside_by_mm": {
+          "蓝": 0.0,
+          "橙": 0.0
+        }
+      }
+    },
+    "stamp_monotonic_s": null,
+    "approximate": true
+  },
+  "reference_world_x_mm": {
+    "blue": 105.0,
+    "yellow": 75.0
+  },
+  "sliders": {
+    "blue": {
+      "reference_world_x_mm": 105.0,
+      "detected_world_x_mm": 99.80071093691873,
+      "error_world_x_mm": -5.199289063081267,
+      "reference_arm_x_mm": -40.0,
+      "detected_arm_x_mm": -34.80071093691873,
+      "old_prediction_expressed_in_new_world_x_mm": 100.61071093691874,
+      "old_error_against_same_reference_mm": -4.389289063081264,
+      "pixel_xy": [
+        494.35,
+        329.9
+      ],
+      "detector_reliable": true,
+      "task_reliable": true,
+      "task_reasons": []
+    },
+    "yellow": {
+      "reference_world_x_mm": 75.0,
+      "detected_world_x_mm": 70.29140774028923,
+      "error_world_x_mm": -4.70859225971077,
+      "reference_arm_x_mm": -10.0,
+      "detected_arm_x_mm": -5.29140774028923,
+      "old_prediction_expressed_in_new_world_x_mm": 71.10140774028923,
+      "old_error_against_same_reference_mm": -3.8985922597107674,
+      "pixel_xy": [
+        581.3,
+        363.55
+      ],
+      "detector_reliable": true,
+      "task_reliable": true,
+      "task_reasons": []
+    }
+  }
+}

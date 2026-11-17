@@ -1,0 +1,122 @@
+{
+  "intrinsics": {
+    "device": "/dev/video31",
+    "sensor": "m01_f_imx415 4-001a / rkisp1-vir0",
+    "rms_px": 0.3440429924154908,
+    "median_image_rms_px": 0.2452903911471367,
+    "worst_images": [
+      [
+        "sample_018.png",
+        1.2683862447738647
+      ],
+      [
+        "sample_022.png",
+        0.5053994655609131
+      ],
+      [
+        "sample_008.png",
+        0.3654366135597229
+      ],
+      [
+        "sample_029.png",
+        0.3299250602722168
+      ],
+      [
+        "sample_010.png",
+        0.3040222227573395
+      ]
+    ],
+    "worst_squared_error_fraction": 0.453057871576614,
+    "coverage": [
+      4,
+      6,
+      7,
+      8
+    ],
+    "canonical_sha256": "5b64b25da2d103167058a41fe15cf6259c6d9087cf0fd8b3cb0577d79c18562e",
+    "external_report_same_source": true,
+    "equal_K": true,
+    "equal_D": true
+  },
+  "world": {
+    "origin": [
+      52.2,
+      174.1,
+      -16.9
+    ],
+    "u_end": [
+      52.2,
+      132.1,
+      -16.9
+    ],
+    "v_end": [
+      52.2,
+      174.1,
+      -46.9
+    ],
+    "world_handedness": "left",
+    "measured_u_length_mm": 42.0,
+    "measured_v_length_mm": 30.0,
+    "expected_u_length_mm": 42.0,
+    "expected_v_length_mm": 30.0,
+    "measured_axes_cosine": 0.0,
+    "note": "O为第一个内角点，U/V为同一行/列末内角点；使用填写格距的刚性正交棋盘，测量小误差不作剪切/伸缩拟合"
+  },
+  "corner_ids": [
+    47,
+    40,
+    7
+  ],
+  "candidates": [
+    {
+      "index": 0,
+      "C_world_mm": [
+        230.11437650326502,
+        98.55605488168251,
+        -98.18823749349983
+      ],
+      "camera_optical_axis_world": [
+        -0.999164842228446,
+        0.008608162024235535,
+        0.03994393071756086
+      ],
+      "rms_px": 0.1726928677813332,
+      "max_error_px": 0.35311584972075943,
+      "off_nominal_axis_deg": 2.3418125205404134,
+      "delta_vs_measured_lens_point_mm": [
+        1.1243765032650117,
+        1.5560548816825133,
+        6.031762506500172
+      ],
+      "distance_vs_measured_lens_point_mm": 6.329904284483588,
+      "det": -1.0,
+      "orthogonality_error": 2.220446049250313e-16
+    },
+    {
+      "index": 1,
+      "C_world_mm": [
+        229.64658710102304,
+        207.99396333181784,
+        34.56689117984149
+      ],
+      "camera_optical_axis_world": [
+        -0.6503081073035862,
+        -0.4969161436175388,
+        -0.5746074414654765
+      ],
+      "rms_px": 3.3246087060109786,
+      "max_error_px": 9.811819311164365,
+      "off_nominal_axis_deg": 49.435164127469506,
+      "delta_vs_measured_lens_point_mm": [
+        0.6565871010230353,
+        110.99396333181784,
+        138.7868911798415
+      ],
+      "distance_vs_measured_lens_point_mm": 177.71294878565072,
+      "det": -1.0,
+      "orthogonality_error": 1.1102230246251565e-16
+    }
+  ],
+  "candidate_rms_ratio": 19.25156926701025,
+  "candidate_center_distance_mm": 172.0488268542987
+}

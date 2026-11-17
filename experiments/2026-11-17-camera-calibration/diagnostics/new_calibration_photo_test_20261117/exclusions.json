@@ -1,0 +1,14 @@
+{
+  "excluded_photos": [
+    "0003",
+    "0004"
+  ],
+  "included_photos": [
+    "0001",
+    "0002",
+    "0005"
+  ],
+  "source": "User direct reply in this chat",
+  "user_reply": "这两张就不测试了，可能有误",
+  "scope": "Exclude both complete photos, all colors, from formal statistics, charts and result package. No further detection on excluded photos."
+}

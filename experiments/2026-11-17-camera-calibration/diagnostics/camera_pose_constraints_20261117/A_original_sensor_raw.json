@@ -1,0 +1,66 @@
+{
+  "name": "offline_constraint_A_original",
+  "image_size_px": [
+    1920,
+    1080
+  ],
+  "C_world_mm": [
+    236.62980019273397,
+    98.32749390674863,
+    -101.5067261324286
+  ],
+  "distortion_model": "plumb_bob",
+  "pixels_are_undistorted": false,
+  "world_handedness": "left",
+  "world_coordinate_frame": "measured_world_x_reversed_20261117",
+  "plane_y_mm": 181.5,
+  "rail_lip_y_mm": 173.5,
+  "intrinsics_device": "/dev/video31",
+  "intrinsics_sensor": "m01_f_imx415 4-001a / rkisp1-vir0",
+  "intrinsics_source_sha256": "0912d6aeed8fb04c84ade5cf29008c8971d70895320e1c73ab58b4e0d1636ba3",
+  "is_approximate": true,
+  "source": "known_world_checkerboard_fixed_intrinsics",
+  "validation_status": "offline_diagnostic_only_not_applied",
+  "K": [
+    [
+      716.2189901331078,
+      0.0,
+      962.4030656020178
+    ],
+    [
+      0.0,
+      709.8954043656283,
+      549.1852291991033
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "D": [
+    0.0494489304766949,
+    -0.062034616503956246,
+    -0.008544277884997018,
+    0.0016088200486371745,
+    0.014973158661467917
+  ],
+  "R_world_from_camera": [
+    [
+      0.002049290658002925,
+      -0.03956910794419858,
+      -0.9992147347313783
+    ],
+    [
+      0.9998891114053857,
+      0.014819654050965688,
+      0.001463812405245178
+    ],
+    [
+      -0.014750094940273278,
+      0.9991069329908135,
+      -0.03959508996002999
+    ]
+  ],
+  "pixel_coordinate_frame": "sensor_raw"
+}

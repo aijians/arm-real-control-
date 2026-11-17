@@ -1,0 +1,7 @@
+{
+  "uploaded_canonical_sha256": "1c35c6b1442560432b289c8f92abd69504aae2d554767af1c2f4da0ce8ad73e5",
+  "browser_integer_normalized_sha256": "0912d6aeed8fb04c84ade5cf29008c8971d70895320e1c73ab58b4e0d1636ba3",
+  "referenced_source_sha256": "0912d6aeed8fb04c84ade5cf29008c8971d70895320e1c73ab58b4e0d1636ba3",
+  "numerically_identical": true,
+  "explanation": "Browser JSON serialization changes integral floats such as 6.0 and 0.0 to integers. Exact referenced hash reproduced without any numeric value change."
+}

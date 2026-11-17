@@ -1,0 +1,26 @@
+[
+  {
+    "photo": "0001",
+    "original_absolute_path": "/home/aijians/文档/ChatGPT/space/diagnostics/photo_redetect_76459ec8_20261117/input/session_20260510_222231_76459ec8/photo_0001_d1a0377e.png",
+    "metadata_path": "/home/aijians/文档/ChatGPT/space/diagnostics/photo_redetect_76459ec8_20261117/input/session_20260510_222231_76459ec8/photo_0001_d1a0377e.json",
+    "sha256": "697e3e0d9909efa852b3dbd42e09bc47fc29c80d839e6307aa3fafeb5476f110",
+    "bytes": 2706893,
+    "reference_note": "世界坐标x橙：60，蓝;113.5"
+  },
+  {
+    "photo": "0002",
+    "original_absolute_path": "/home/aijians/文档/ChatGPT/space/diagnostics/photo_redetect_76459ec8_20261117/input/session_20260510_222231_76459ec8/photo_0002_57239ffd.png",
+    "metadata_path": "/home/aijians/文档/ChatGPT/space/diagnostics/photo_redetect_76459ec8_20261117/input/session_20260510_222231_76459ec8/photo_0002_57239ffd.json",
+    "sha256": "e9b07a6484e1bf98bbbdc470b620fc9bf19a5204b2adf91d8525c3952d251c72",
+    "bytes": 2641987,
+    "reference_note": "世界坐标x橙：80，蓝;113.5"
+  },
+  {
+    "photo": "0005",
+    "original_absolute_path": "/home/aijians/文档/ChatGPT/space/diagnostics/photo_redetect_76459ec8_20261117/input/session_20260510_222231_76459ec8/photo_0005_ce285e3d.png",
+    "metadata_path": "/home/aijians/文档/ChatGPT/space/diagnostics/photo_redetect_76459ec8_20261117/input/session_20260510_222231_76459ec8/photo_0005_ce285e3d.json",
+    "sha256": "294d000bb72256181234ecf8e5f2b16b075ce02d2ee71b70bad982a6d10b439d",
+    "bytes": 2594344,
+    "reference_note": "世界坐标x橙：75，蓝;105"
+  }
+]

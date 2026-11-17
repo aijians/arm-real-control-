@@ -1,0 +1,100 @@
+{
+  "included_photos": [
+    "0001",
+    "0002",
+    "0005"
+  ],
+  "excluded_photos": [
+    "0003",
+    "0004"
+  ],
+  "images": 3,
+  "points": 6,
+  "previous_calibration": "Prior measured nominal pose plus borrowed video22 intrinsics, on exactly the same pixels and world references",
+  "new_calibration": "Provided video31 sensor_raw full calibration, candidate 0, transformed consistently into scene_upright",
+  "all_pixels_identical_to_previous": true,
+  "all_180_rotation_checks_pass": true,
+  "independent_raw_ray_verification_max_mm": 4.084199645149056e-11,
+  "all_detector_pairs_reliable": 3,
+  "all_task_pairs_reliable": 3,
+  "git_commit": "6df87784cd54392ad9a27c375587de29715ce4e3",
+  "source_sha256": {
+    "vision_tools/detect_sliders.py": "959669db2a04def488b9545cd21631f4e274b4a62b909085b54b7cc38b663d9e",
+    "vision_tools/pixel_to_world.py": "5a0b76c116feadee9783b3155a05ba8a9f53db0d4e9cfbae0acad6bde2169988",
+    "control/vision.py": "dc408e1975cdccffc37e20135764c04d0347ac337ed7a4267a44baa08bf40c0e"
+  },
+  "metrics": {
+    "蓝": {
+      "previous": {
+        "n": 3,
+        "mean_error_mm": -5.017851332379109,
+        "mae_mm": 5.017851332379109,
+        "rmse_mm": 5.02443268569955,
+        "max_abs_error_mm": 5.19998405912348,
+        "within_0_5_mm": 0
+      },
+      "new": {
+        "n": 3,
+        "mean_error_mm": -2.8005899329905475,
+        "mae_mm": 2.8005899329905475,
+        "rmse_mm": 2.812525395723347,
+        "max_abs_error_mm": 2.9854319941275946,
+        "within_0_5_mm": 0
+      }
+    },
+    "橙": {
+      "previous": {
+        "n": 3,
+        "mean_error_mm": -4.256861685536705,
+        "mae_mm": 4.256861685536705,
+        "rmse_mm": 4.269076398152193,
+        "max_abs_error_mm": 4.70859225971077,
+        "within_0_5_mm": 0
+      },
+      "new": {
+        "n": 3,
+        "mean_error_mm": -1.9675639654101265,
+        "mae_mm": 1.9675639654101265,
+        "rmse_mm": 1.9948656604813844,
+        "max_abs_error_mm": 2.432387925577018,
+        "within_0_5_mm": 0
+      }
+    },
+    "combined": {
+      "previous": {
+        "n": 6,
+        "mean_error_mm": -4.637356508957907,
+        "mae_mm": 4.637356508957907,
+        "rmse_mm": 4.662077707760033,
+        "max_abs_error_mm": 5.19998405912348,
+        "within_0_5_mm": 0
+      },
+      "new": {
+        "n": 6,
+        "mean_error_mm": -2.384076949200337,
+        "mae_mm": 2.384076949200337,
+        "rmse_mm": 2.438215341695294,
+        "max_abs_error_mm": 2.9854319941275946,
+        "within_0_5_mm": 0
+      }
+    }
+  },
+  "parameter_fitting": false,
+  "production_or_board_modified": false,
+  "live_camera_opened": false,
+  "UART_opened": false,
+  "image_camera_configuration_unchanged_since_calibration": true,
+  "user_confirmation": "镜头、焦点和相机位置都未改变",
+  "reference_precision_note": "Manual metadata world X references; measurement uncertainty not supplied",
+  "relative_motion_examples": {
+    "blue": {
+      "reference_delta_mm": -8.5,
+      "detected_delta_mm": -8.503643369176089
+    },
+    "yellow": {
+      "reference_delta_mm": 20.0,
+      "detected_delta_mm": 20.03003881636741
+    }
+  },
+  "mean_absolute_error_reduction_fraction": 0.4858974192311819
+}

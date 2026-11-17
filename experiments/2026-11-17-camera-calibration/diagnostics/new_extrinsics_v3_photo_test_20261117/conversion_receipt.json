@@ -1,0 +1,16 @@
+{
+  "source_sha256": "3ecf24c5aa3af9f6b754c694ec7909ac2877a8cdfa0ed2e771770997d69cb0df",
+  "intrinsics_file_sha256": "c79b71c47d790c6f1fc68ab29819366aefd5b82a5b138bd35e6bcbb426a7fa36",
+  "reviewed_candidate": 0,
+  "physical_camera_pose_unchanged_by_conversion": true,
+  "image_rotation_deg": 180,
+  "formula_R": "R_upright=R_raw@diag(-1,-1,1)",
+  "formula_K": "cx_upright=1919-cx_raw;cy_upright=1079-cy_raw;fx/fy unchanged",
+  "formula_D": "p1/p2 change sign; radial unchanged",
+  "actual_calibration_C": [
+    236.62980019273397,
+    98.32749390674863,
+    -101.5067261324286
+  ],
+  "fit_or_compensation_performed": false
+}

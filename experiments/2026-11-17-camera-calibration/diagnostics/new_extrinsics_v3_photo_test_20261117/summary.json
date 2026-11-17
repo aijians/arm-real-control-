@@ -1,0 +1,109 @@
+{
+  "included_photos": [
+    "0001",
+    "0002",
+    "0005"
+  ],
+  "excluded_photos": [
+    "0003",
+    "0004"
+  ],
+  "images": 3,
+  "points": 6,
+  "previous_calibration": "Previous video31 30-photo intrinsics plus prior extrinsics candidate 0, same pixels and world references",
+  "new_calibration": "Provided video31 34-photo intrinsics plus new extrinsics candidate 0, transformed consistently into scene_upright",
+  "all_pixels_identical_to_previous": true,
+  "all_180_rotation_checks_pass": true,
+  "independent_raw_ray_verification_max_mm": 1.4026113603904378e-10,
+  "all_detector_pairs_reliable": 3,
+  "all_task_pairs_reliable": 3,
+  "git_commit": "6df87784cd54392ad9a27c375587de29715ce4e3",
+  "source_sha256": {
+    "vision_tools/detect_sliders.py": "959669db2a04def488b9545cd21631f4e274b4a62b909085b54b7cc38b663d9e",
+    "vision_tools/pixel_to_world.py": "5a0b76c116feadee9783b3155a05ba8a9f53db0d4e9cfbae0acad6bde2169988",
+    "control/vision.py": "dc408e1975cdccffc37e20135764c04d0347ac337ed7a4267a44baa08bf40c0e"
+  },
+  "metrics": {
+    "蓝": {
+      "previous": {
+        "n": 3,
+        "mean_error_mm": -2.8005899329905475,
+        "mae_mm": 2.8005899329905475,
+        "rmse_mm": 2.812525395723347,
+        "max_abs_error_mm": 2.9854319941275946,
+        "within_0_5_mm": 0
+      },
+      "new": {
+        "n": 3,
+        "mean_error_mm": 1.68970026119266,
+        "mae_mm": 1.68970026119266,
+        "rmse_mm": 1.7107413153892634,
+        "max_abs_error_mm": 2.0673828130920526,
+        "within_0_5_mm": 0
+      }
+    },
+    "橙": {
+      "previous": {
+        "n": 3,
+        "mean_error_mm": -1.9675639654101265,
+        "mae_mm": 1.9675639654101265,
+        "rmse_mm": 1.9948656604813844,
+        "max_abs_error_mm": 2.432387925577018,
+        "within_0_5_mm": 0
+      },
+      "new": {
+        "n": 3,
+        "mean_error_mm": 2.270735633827703,
+        "mae_mm": 2.270735633827703,
+        "rmse_mm": 2.2933029749820584,
+        "max_abs_error_mm": 2.5953543809540918,
+        "within_0_5_mm": 0
+      }
+    },
+    "combined": {
+      "previous": {
+        "n": 6,
+        "mean_error_mm": -2.384076949200337,
+        "mae_mm": 2.384076949200337,
+        "rmse_mm": 2.438215341695294,
+        "max_abs_error_mm": 2.9854319941275946,
+        "within_0_5_mm": 0
+      },
+      "new": {
+        "n": 6,
+        "mean_error_mm": 1.9802179475101813,
+        "mae_mm": 1.9802179475101813,
+        "rmse_mm": 2.0231008851811305,
+        "max_abs_error_mm": 2.5953543809540918,
+        "within_0_5_mm": 0
+      }
+    }
+  },
+  "parameter_fitting": false,
+  "production_or_board_modified": false,
+  "live_camera_opened": false,
+  "UART_opened": false,
+  "old_photo_replay_assumes_same_camera_lens_focus_and_mount": true,
+  "prior_user_confirmation": "镜头、焦点和相机位置都未改变",
+  "no_new_physical_pose_measurement_performed": true,
+  "reference_precision_note": "Manual metadata world X references; measurement uncertainty not supplied",
+  "relative_motion_examples": {
+    "blue": {
+      "from_photo": "0001",
+      "to_photo": "0005",
+      "reference_delta_mm": -8.5,
+      "detected_delta_mm": -8.53689068993323
+    },
+    "yellow": {
+      "from_photo": "0001",
+      "to_photo": "0002",
+      "reference_delta_mm": 20.0,
+      "detected_delta_mm": 20.212220410112394
+    }
+  },
+  "mean_absolute_error_reduction_fraction": 0.16939847592822754,
+  "all_new_errors_positive": true,
+  "rail_lip_y_changed_from_mm": 172.5,
+  "rail_lip_y_changed_to_mm": 173.5,
+  "lip_plane_change_effect_on_slider_XYZ_mm": 0.0
+}
