@@ -177,6 +177,27 @@ class SerialTransportTests(unittest.TestCase):
             self.assertEqual((request.command, request.motor_id), (0xA6, 17))
             self.assertEqual(request.payload, bytes.fromhex("01 B0 36 00 90 01 00 00"))
 
+    def test_raw_tuner_ignores_nonzero_offset_sign_and_ratio_on_wire(self):
+        replies = {0x94: (14000).to_bytes(4, "little"),
+                   0x9C: bytes.fromhex("F6 FF FF F6 FF FF FF"),
+                   0x9A: bytes(7), 0xA6: bytes(7)}
+
+        def respond(request, peer):
+            send_reply(peer, make_frame(request.command, 17, replies[request.command]))
+
+        with motor_emulator(respond) as (device, port, received, logs):
+            device.connection.update(sign=-1, ratio=2., offset_deg=180., angle_space='motor_raw')
+            row = device.telemetry()
+            self.assertEqual(row['angle_deg'], 140.)
+            self.assertEqual(row['motor_angle_deg'], 140.)
+            self.assertEqual(row['speed_deg_s'], -10.)
+            for target, direction in ((141., 0), (139., 1)):
+                device.move(target, 2., row['motor_angle_deg'])
+                request = received[-1]
+                self.assertEqual(request.payload[0], direction)
+                self.assertEqual(int.from_bytes(request.payload[1:4], 'little'), round(target*100))
+                self.assertEqual(int.from_bytes(request.payload[4:8], 'little'), 200)
+
     def test_pending_read_yields_to_stop(self):
         requested = threading.Event()
 

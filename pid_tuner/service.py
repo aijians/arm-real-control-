@@ -11,7 +11,7 @@ import uuid
 
 from control.config import save_json
 from control.runtime import instance_lock
-from .device import DemoDevice, SerialDevice
+from .device import DemoDevice, SerialDevice, motor_command
 from .protocol import decode_parameter, encode_pid
 from .vendor import check_settings_save, parameter_from_settings, PID_SLICES
 
@@ -71,9 +71,12 @@ class Tuner:
                            'baudrate': int(config['hardware']['baudrate']),
                            **{k: motor[k] for k in ('sign', 'ratio', 'offset_deg')}}
         self.connection['parameter_protocol'] = config['hardware'].get('pid_parameter_protocol', 'vendor_v235')
+        self.connection['angle_space'] = 'motor_raw'
         self._settings_backup = None
         self._settings_save_reference = None
-        self.limits = {'min_deg': motor['limits_deg'][0], 'max_deg': motor['limits_deg'][1],
+        raw_limits = sorted(motor['offset_deg'] + motor['sign']*motor['ratio']*q
+                            for q in motor['limits_deg'])
+        self.limits = {'min_deg': raw_limits[0], 'max_deg': raw_limits[1],
                        'max_test_delta_deg': 10., 'max_test_speed_deg_s': 60.,
                        'default_speed_deg_s': min(60., config['hardware']['max_speed_deg_s'])}
         self.runtime_dir = Path(paths['runtime_dir'])
@@ -531,11 +534,11 @@ class Tuner:
             raise ValueError(f'目标角度超出{self.axis_label}配置限位')
         if not 0 < speed <= self.limits['max_test_speed_deg_s']:
             raise ValueError('试转速度必须大于0且不超过60°/s')
-        motor_target = round((self.connection['offset_deg'] + self.connection['sign']
-                              * self.connection['ratio'] * target) * 100)
+        motor_target_deg, motor_speed = motor_command(self.connection, target, speed)
+        motor_target = round(motor_target_deg * 100)
         if not 0 <= motor_target <= 35999:
             raise ValueError('电机目标超出本调参台A6单圈范围，不能下发负角目标')
-        if round(speed * self.connection['ratio'] * 100) > 36000:
+        if round(motor_speed * 100) > 36000:
             raise ValueError('电机轴速度超出本工具支持范围')
         with self._ops:
             self._require()
@@ -808,13 +811,14 @@ class Tuner:
 
     def csv(self):
         stream = io.StringIO()
-        fields = ['axis', 'motor_id', 'seq', 't', 'target_deg', 'angle_deg', 'motor_angle_deg', 'speed_deg_s',
+        fields = ['axis', 'motor_id', 'angle_space', 'seq', 't', 'target_deg', 'angle_deg', 'motor_angle_deg', 'speed_deg_s',
                   'motion_phase', 'trial_outcome', 'trial_id', 'target_error_deg',
                   'bus_current_a', 'iq_or_power_raw', 'voltage_v', 'temperature_c', 'error_state']
         writer = csv.DictWriter(stream, fieldnames=fields, extrasaction='ignore')
         writer.writeheader()
         for row in self.export()['readings']:
-            writer.writerow({**row, 'axis': self.axis, 'motor_id': self.connection['motor_id']})
+            writer.writerow({**row, 'axis': self.axis, 'motor_id': self.connection['motor_id'],
+                             'angle_space': self.connection['angle_space']})
         return '\ufeff'+stream.getvalue()
 
     def close(self):

@@ -43,8 +43,8 @@
 
     <div id="parameter-interlock" class="message safety-interlock" role="alert" hidden><strong>参数写入未确认</strong><span>暂禁保存、使能和试转。写入可能已生效，也可能失败；请先核对应答与操作记录，不要反复重写或用重连消除提示。</span></div>
     <section class="metrics" aria-label="电机实时状态">
-      <article class="metric"><span class="label">当前位置</span><div><strong id="angle-value">—</strong><span class="unit">°</span></div><span id="target-caption" class="metric-caption">目标 — °</span></article>
-      <article class="metric"><span class="label">反馈速度</span><div><strong id="speed-value">—</strong><span class="unit">°/s</span></div><span class="metric-caption">机械角速度</span></article>
+      <article class="metric"><span class="label">原始电机角（不应用 offset）</span><div><strong id="angle-value">—</strong><span class="unit">°</span></div><span id="target-caption" class="metric-caption">目标 — °</span></article>
+      <article class="metric"><span class="label">反馈速度</span><div><strong id="speed-value">—</strong><span class="unit">°/s</span></div><span class="metric-caption">原始电机轴角速度</span></article>
       <article class="metric"><span class="label">母线电流</span><div><strong id="current-value">—</strong><span class="unit">A</span></div><span class="metric-caption">总线反馈值</span></article>
       <article class="metric health-metric"><div class="health-line"><span class="label">电压</span><strong><span id="voltage-value">—</span><small> V</small></strong><span class="label">温度</span><strong><span id="temperature-value">—</span><small> °C</small></strong></div><div id="fault-state" class="fault-state neutral"><span class="status-dot"></span><span id="fault-text">等待故障状态</span></div><span id="motor-state" class="metric-caption">电机状态 —</span></article>
     </section>
@@ -79,7 +79,7 @@
         <section class="card motion-card">
           <div class="card-heading"><div><p class="eyebrow">SINGLE MOVE</p><h2>单次小幅试转</h2></div><span id="motion-status" class="badge muted">待机</span></div>
           <p class="motion-hint">先支撑所选关节、清空行程。到位后连续验证 3 秒，通过后持续保持原目标，可直接输入下一角度。每个新目标重新验证，不发送返回起点指令。</p><p id="ram-ack-notice" class="motion-hint" hidden>RAM 写入已收到成功应答，运行参数未独立读回。试转需人工触发；先用当前位置附近 2° 小幅验证，观察抖动、温升与输出后再决定是否保存。</p>
-          <div class="motion-inputs"><label>目标位置 <span>° · 绝对角度</span><div class="input-unit"><input id="move-target" type="number" step="0.1" inputmode="decimal" placeholder="先读取位置" disabled><button id="use-current" title="填入当前反馈角度" disabled>取当前位置</button></div></label><label>试转速度 <span>°/s</span><input id="move-speed" type="number" min="0.1" max="60" step="0.1" value="18" inputmode="decimal" disabled></label></div>
+          <div class="motion-inputs"><label>目标位置 <span>° · 原始电机角，不应用 offset</span><div class="input-unit"><input id="move-target" type="number" step="0.1" inputmode="decimal" placeholder="先读取位置" disabled><button id="use-current" title="填入当前反馈角度" disabled>取当前位置</button></div></label><label>试转速度 <span>°/s</span><input id="move-speed" type="number" min="0.1" max="60" step="0.1" value="18" inputmode="decimal" disabled></label></div>
           <div class="motion-boundary" id="motion-limits">单次位移 ≤ 10° · 速度 ≤ 60°/s</div>
           <div class="motion-actions"><button id="enable" class="button secondary" disabled>使能电机</button><button id="move" class="button primary" disabled>▶ 试转并保持观察</button><button id="stop" class="button stop" disabled><span aria-hidden="true">■</span> 停止电机</button></div>
           <div id="trial-panel" class="trial-panel" aria-live="polite">
@@ -100,7 +100,7 @@
         <section class="card monitor-card">
           <div class="card-heading"><div><p class="eyebrow">LIVE TELEMETRY</p><h2>实时反馈</h2></div><div class="live-indicator"><span id="live-dot"></span><span id="live-label">等待采样</span></div></div>
           <div class="chart-toolbar"><span>时间窗口 <strong>30 s</strong></span><button id="clear-charts" class="text-button">清空曲线</button></div>
-          <div class="chart-block"><div class="chart-heading"><h3>角度 <span>°</span></h3><div class="legend"><span><i class="line-key target-key"></i>目标</span><span><i class="line-key angle-key"></i>反馈</span></div></div><div class="chart-wrap"><canvas id="angle-chart" aria-label="最近30秒目标角度和反馈角度曲线" role="img"></canvas><span class="chart-empty" id="angle-empty">连接电机后显示反馈</span></div></div>
+          <div class="chart-block"><div class="chart-heading"><h3>原始电机角 <span>°</span></h3><div class="legend"><span><i class="line-key target-key"></i>目标</span><span><i class="line-key angle-key"></i>反馈</span></div></div><div class="chart-wrap"><canvas id="angle-chart" aria-label="最近30秒目标角度和反馈角度曲线" role="img"></canvas><span class="chart-empty" id="angle-empty">连接电机后显示反馈</span></div></div>
           <div class="chart-block"><div class="chart-heading"><h3>速度 <span>°/s</span></h3><span class="chart-last" id="speed-last">—</span></div><div class="chart-wrap"><canvas id="speed-chart" aria-label="最近30秒反馈速度曲线" role="img"></canvas><span class="chart-empty" id="speed-empty">等待采样</span></div></div>
           <div class="chart-block"><div class="chart-heading"><h3>母线电流 <span>A</span></h3><span class="chart-last" id="current-last">—</span></div><div class="chart-wrap"><canvas id="current-chart" aria-label="最近30秒母线电流曲线" role="img"></canvas><span class="chart-empty" id="current-empty">等待采样</span></div></div>
           <div class="chart-block"><div class="chart-heading"><h3>MS 输出反馈 <span>raw · 对照限制 850</span></h3></div><div class="chart-wrap"><canvas id="power-chart" aria-label="最近30秒MS输出原始值曲线" role="img"></canvas></div><p class="subtle">持续接近 ±850 且仍推不动时，继续增大 PID 通常不能提高可用输出；先停止并检查负载、摩擦及供电。</p></div>

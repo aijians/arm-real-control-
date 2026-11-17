@@ -71,7 +71,7 @@ class DualTests(unittest.TestCase):
 
     def test_invalid_second_axis_never_sends_either_move(self):
         self.tuner.connect_all()
-        targets=self.targets();targets['lower']['target_deg']=91.
+        targets=self.targets();targets['lower']['target_deg']=92.
         with self.assertRaises(RuntimeError):self.tuner.move_both(targets)
         self.assertTrue(all(not calls for calls in self.moves().values()))
         self.assertFalse(self.tuner.group['active'])
@@ -80,6 +80,8 @@ class DualTests(unittest.TestCase):
     def test_a6_negative_target_is_rejected_before_either_axis_dispatches(self):
         self.tuner.connect_all()
         self.created['lower'].angle=self.created['lower'].target=0.
+        # Isolate the protocol guard even if a site configuration allows negative angles.
+        self.tuner.select('lower').limits['min_deg'] = -1.
         targets=self.targets();targets['lower']['target_deg']=-.5
         with self.assertRaisesRegex(RuntimeError,'A6单圈范围'):
             self.tuner.move_both(targets)

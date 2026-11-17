@@ -13,6 +13,14 @@ from .protocol import (decode_parameter, decode_parameter_reply, decode_product_
 from .vendor import extract_reply, frame_bytes, validate_settings, parameter_from_settings
 
 
+def motor_command(connection, target_deg, speed_deg_s):
+    """Keep raw tuner inputs separate from model-coordinate callers."""
+    if connection.get('angle_space') == 'motor_raw':
+        return target_deg, speed_deg_s
+    return (connection['offset_deg'] + connection['sign'] * connection['ratio'] * target_deg,
+            speed_deg_s * connection['ratio'])
+
+
 class ReplyTimeout(TimeoutError):
     """Keep byte-level evidence when no acceptable response was obtained."""
     def __init__(self, motor_id, command, param, details):
@@ -209,9 +217,10 @@ class SerialDevice:
         state2 = decode_status2(self._transaction(make_frame(0x9C, self.motor_id), 0x9C).payload)
         state1 = decode_status1(self._transaction(make_frame(0x9A, self.motor_id), 0x9A).payload)
         sign, ratio, offset = (self.connection[k] for k in ('sign', 'ratio', 'offset_deg'))
+        raw = self.connection.get('angle_space') == 'motor_raw'
         return {**state2, **state1, 'motor_angle_deg': angle,
-                'angle_deg': (angle-offset)/(sign*ratio),
-                'speed_deg_s': state2['speed_deg_s']/(sign*ratio)}
+                'angle_deg': angle if raw else (angle-offset)/(sign*ratio),
+                'speed_deg_s': state2['speed_deg_s'] if raw else state2['speed_deg_s']/(sign*ratio)}
 
     def _simple(self, command):
         frame = self._transaction(make_frame(command, self.motor_id), command)
@@ -225,11 +234,11 @@ class SerialDevice:
         self._simple(0x88)
 
     def move(self, target_deg, speed_deg_s, current_motor_deg):
-        c = self.connection
-        target = round((c['offset_deg']+c['sign']*c['ratio']*target_deg)*100)
+        motor_target, motor_speed = motor_command(self.connection, target_deg, speed_deg_s)
+        target = round(motor_target*100)
         if not 0 <= target <= 35999:
             raise ValueError('电机目标超出单圈协议范围')
-        speed = max(1, round(speed_deg_s*c['ratio']*100))
+        speed = max(1, round(motor_speed*100))
         if speed > 36000:
             raise ValueError('电机轴速度超出本工具支持范围')
         packet = position_frame(self.motor_id, 0 if target/100 > current_motor_deg else 1, target, speed)
@@ -302,8 +311,10 @@ class DemoDevice:
         self.angle += math.copysign(min(abs(delta), abs(velocity)*dt), delta) if delta else 0.
         c = self.connection
         motor_angle = c['offset_deg']+c['sign']*c['ratio']*self.angle
-        return {'angle_deg': self.angle, 'motor_angle_deg': motor_angle,
-                'speed_deg_s': velocity, 'bus_current_a': round(0.25+abs(velocity)*0.08, 3),
+        raw = c.get('angle_space') == 'motor_raw'
+        return {'angle_deg': motor_angle if raw else self.angle, 'motor_angle_deg': motor_angle,
+                'speed_deg_s': velocity*c['sign']*c['ratio'] if raw else velocity,
+                'bus_current_a': round(0.25+abs(velocity)*0.08, 3),
                 'voltage_v': 24., 'temperature_c': 32,
                 'iq_or_power_raw': round(velocity*8), 'encoder_raw': round(motor_angle/360*16384),
                 'motor_state': 0 if self.enabled else 0x10, 'error_state': 0, 'error_flags': []}
@@ -318,8 +329,12 @@ class DemoDevice:
 
     def move(self, target_deg, speed_deg_s, current_motor_deg):
         c = self.connection
-        target_motor = c['offset_deg']+c['sign']*c['ratio']*target_deg
+        target_motor, motor_speed = motor_command(c, target_deg, speed_deg_s)
         packet = position_frame(c['motor_id'], 0 if target_motor > current_motor_deg else 1,
-                                round(target_motor*100), round(speed_deg_s*c['ratio']*100))
+                                round(target_motor*100), round(motor_speed*100))
         self._wire(packet, bytes(7))
-        self.target, self.speed = target_deg, speed_deg_s
+        if c.get('angle_space') == 'motor_raw':
+            self.target = (target_deg-c['offset_deg'])/(c['sign']*c['ratio'])
+            self.speed = speed_deg_s/c['ratio']
+        else:
+            self.target, self.speed = target_deg, speed_deg_s
