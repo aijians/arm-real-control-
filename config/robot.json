@@ -134,11 +134,7 @@
     "task_start_pid": {
       "enabled": true,
       "upper": {
-        "angle": {
-          "kp": 50,
-          "ki": 0,
-          "kd": 0
-        },
+        "angle": {"kp": 550, "ki": 30, "kd": 0},
         "speed": {
           "kp": 500,
           "ki": 25,
