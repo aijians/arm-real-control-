@@ -1,0 +1,85 @@
+{
+  "name": "runtime_scheme_E_fixed_Cy_Cz",
+  "image_size_px": [
+    1920,
+    1080
+  ],
+  "C_world_mm": [
+    235.58198340727904,
+    97.0,
+    -102.8
+  ],
+  "distortion_model": "plumb_bob",
+  "pixels_are_undistorted": false,
+  "world_handedness": "left",
+  "world_coordinate_frame": "measured_world_x_reversed_20261117",
+  "plane_y_mm": 181.5,
+  "rail_lip_y_mm": 173.5,
+  "intrinsics_device": "/dev/video31",
+  "intrinsics_sensor": "m01_f_imx415 4-001a / rkisp1-vir0",
+  "intrinsics_source_sha256": "0912d6aeed8fb04c84ade5cf29008c8971d70895320e1c73ab58b4e0d1636ba3",
+  "is_approximate": true,
+  "source": "known_world_checkerboard_fixed_Cy_Cz_refit_Cx_orientation_scheme_E",
+  "validation_status": "user_selected_for_runtime_independent_accuracy_not_certified",
+  "K": [
+    [
+      716.2189901331078,
+      0.0,
+      962.4030656020178
+    ],
+    [
+      0.0,
+      709.8954043656283,
+      549.1852291991033
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "D": [
+    0.0494489304766949,
+    -0.062034616503956246,
+    -0.008544277884997018,
+    0.0016088200486371745,
+    0.014973158661467917
+  ],
+  "R_world_from_camera": [
+    [
+      0.00799422702402335,
+      -0.03327107930788599,
+      -0.9994143923398222
+    ],
+    [
+      0.9998507329910139,
+      0.015574753089102826,
+      0.00747922479577063
+    ],
+    [
+      -0.015316790513046897,
+      0.9993250033637213,
+      -0.03339062114542937
+    ]
+  ],
+  "pixel_coordinate_frame": "sensor_raw",
+  "runtime_selection": {
+    "scheme": "E",
+    "selected_by": "user",
+    "selected_date": "2026-11-18",
+    "fixed_Cy_Cz_mm": [
+      97.0,
+      -102.8
+    ],
+    "checkerboard_rms_px": 0.21990792306618145,
+    "historical_photo_validation": {
+      "n": 6,
+      "mean_error_mm": 0.8967177011230755,
+      "mae_mm": 0.8967177011230755,
+      "rmse_mm": 1.0209380795097576,
+      "max_abs_error_mm": 1.542185059696351,
+      "within_0_5_mm": 2
+    },
+    "note": "User selected this existing solution; no refit or added X compensation. Historical six points do not certify full-travel accuracy."
+  }
+}

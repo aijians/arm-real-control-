@@ -44,6 +44,13 @@ def detection(shift=0., blue=-41., orange=12., blue_reliable=None):
 class RailVisionTests(unittest.TestCase):
     def setUp(self):
         self.config = json.loads((ROOT/'config/robot.json').read_text())
+        # This suite uses synthetic pixels in the historical camera/world frame.
+        # Keep that fixture explicit when the production installation changes.
+        self.config['vision'].update(calibration=None,
+            shoulder_global_xy_mm=[189.3, 28.5],
+            fixed_slider_limits_x_mm=copy.deepcopy(FIXED))
+        self.config['vision'].pop('shoulder_global_xyz_mm', None)
+        self.config['vision'].pop('world_to_model_axis_signs', None)
         self.vision = Vision(ROOT, self.config['vision'])
         self.image = np.zeros((1080, 1920, 3), np.uint8)
 
