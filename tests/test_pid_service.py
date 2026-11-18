@@ -289,16 +289,25 @@ class ServiceTests(unittest.TestCase):
         tuner.enable('ENABLE_MOTOR')
         self.assertIn(('enable',), self.device.calls)
 
-    def test_move_validates_finite_input_distance_speed_and_configured_limits(self):
+    def test_move_validates_finite_input_speed_and_packet_range(self):
         tuner = self.create()
         for target, speed in ((float('nan'), 5), (170, float('inf')), (True, 5),
-                              ('170', 5), (170, True), (180.01, 5), (-0.01, 5),
-                              (158, 5), (170, 0), (170, -1), (170, 60.01)):
+                              ('170', 5), (170, True), (360, 5), (-0.01, 5),
+                              (170, 0), (170, -1), (170, 60.01)):
             with self.subTest(target=target, speed=speed), self.assertRaises(ValueError):
                 tuner.move(target, speed)
         self.assertFalse(any(call[0] == 'move' for call in self.device.calls))
         tuner.move(179.11, 60)
         self.assertTrue(tuner.motion['active'])
+
+    def test_large_move_and_feedback_outside_robot_limits_are_allowed(self):
+        tuner = self.create()
+        self.device.angle = self.device.target = 200.
+        tuner.move(250., 18.)
+        self.assertIn(('move', 250., 18., 200.), self.device.calls)
+        tuner._monitor_once()
+        self.assertTrue(tuner.motion['active'])
+        self.assertIsNone(tuner.limits['max_test_delta_deg'])
 
     def test_move_rejects_fault_motor_off_and_existing_motion(self):
         tuner = self.create()

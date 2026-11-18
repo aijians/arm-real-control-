@@ -71,7 +71,7 @@ class DualTests(unittest.TestCase):
 
     def test_invalid_second_axis_never_sends_either_move(self):
         self.tuner.connect_all()
-        targets=self.targets();targets['lower']['target_deg']=92.
+        targets=self.targets();targets['lower']['target_deg']=360.
         with self.assertRaises(RuntimeError):self.tuner.move_both(targets)
         self.assertTrue(all(not calls for calls in self.moves().values()))
         self.assertFalse(self.tuner.group['active'])
@@ -80,12 +80,48 @@ class DualTests(unittest.TestCase):
     def test_a6_negative_target_is_rejected_before_either_axis_dispatches(self):
         self.tuner.connect_all()
         self.created['lower'].angle=self.created['lower'].target=0.
-        # Isolate the protocol guard even if a site configuration allows negative angles.
-        self.tuner.select('lower').limits['min_deg'] = -1.
         targets=self.targets();targets['lower']['target_deg']=-.5
         with self.assertRaisesRegex(RuntimeError,'A6单圈范围'):
             self.tuner.move_both(targets)
         self.assertTrue(all(not calls for calls in self.moves().values()))
+
+    def test_large_pair_can_skip_endpoint_checks_and_retarget_without_stop(self):
+        self.tuner.connect_all()
+        targets=self.targets();targets['upper']['target_deg']=140.;targets['lower']['target_deg']=100.
+        self.tuner.move_both(targets, verify_endpoint=False)
+        self.tuner.monitor_once()
+        self.assertEqual(self.tuner.group['result'], 'unverified')
+        self.assertTrue(self.tuner.group['active'])
+        for t in self.tuner.axes.values():
+            self.assertEqual(t.motion['trial_outcome'], 'skipped')
+            self.assertFalse(t.motion['verify_endpoint'])
+        self.tuner.move_both(self.targets(), verify_endpoint=False)
+        self.assertTrue(all(len(calls)==2 for calls in self.moves().values()))
+        self.assertFalse(any(c[0]=='stop' for d in self.created.values() for c in d.calls))
+        self.tuner.stop_all()
+        self.assertFalse(self.tuner.group['active'])
+
+    def test_unverified_pair_still_stops_both_when_one_axis_faults(self):
+        self.tuner.connect_all();self.tuner.move_both(self.targets(), verify_endpoint=False)
+        self.created['lower'].overrides={'error_state':1,'error_flags':['overcurrent']}
+        self.tuner.select('lower')._monitor_once()
+        self.tuner.monitor_once()
+        self.assertFalse(self.tuner.group['active'])
+        self.assertTrue(all(any(c[0]=='stop' for c in d.calls) for d in self.created.values()))
+
+    def test_dual_http_endpoint_option_defaults_true_and_rejects_non_boolean(self):
+        self.tuner.connect_all()
+        for flag in ('false', 0, None):
+            h=CaptureHandler('/api/dual/move', {'targets':self.targets(),'verify_endpoint':flag})
+            h.server.tuner=self.tuner;h.do_POST();self.assertEqual(h.result[0],400)
+        self.assertTrue(all(not calls for calls in self.moves().values()))
+        h=CaptureHandler('/api/dual/move', {'targets':self.targets(),'verify_endpoint':False})
+        h.server.tuner=self.tuner;h.do_POST();self.assertEqual(h.result[0],200)
+        self.assertFalse(self.tuner.group['verify_endpoint'])
+        self.tuner.stop_all()
+        h=CaptureHandler('/api/dual/move', {'targets':self.targets()})
+        h.server.tuner=self.tuner;h.do_POST();self.assertEqual(h.result[0],200)
+        self.assertTrue(self.tuner.group['verify_endpoint'])
 
     def test_requested_stop_is_not_reclassified_as_group_failure_while_waiting(self):
         self.tuner.connect_all();self.tuner.move_both(self.targets())

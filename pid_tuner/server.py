@@ -142,7 +142,8 @@ class Handler(BaseHTTPRequestHandler):
                 actions = {'/api/dual/connect': (set(), dual.connect_all),
                            '/api/dual/disconnect': (set(), dual.disconnect_all),
                            '/api/dual/stop': (set(), dual.stop_all),
-                           '/api/dual/move': ({'targets'}, lambda: dual.move_both(body['targets']))}
+                           '/api/dual/move': ({'targets'} | ({'verify_endpoint'} if 'verify_endpoint' in body else set()),
+                                              lambda: dual.move_both(body['targets'], verify_endpoint=body.get('verify_endpoint', True)))}
                 if path not in actions:
                     self._reply(404, {'ok': False, 'error': '路径不存在'})
                     return

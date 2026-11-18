@@ -322,6 +322,7 @@
     const active = Boolean(motion.active);
     const holding = active && motion.phase === 'holding';
     const outcome = motion.trial_outcome || (active ? 'pending' : 'idle');
+    const skipped = outcome === 'skipped';
     const passed = outcome === 'passed';
     const warning = holding ? motion.hold_warning : null;
     const tolerance = number(motion.tolerance_deg) ? motion.tolerance_deg : 0.2;
@@ -333,12 +334,13 @@
     const motionResults = {idle:'待机', running:'正在试转', observing:'到位 · 保持验证中', completed:'试验已结束', hold_finished:'保持观察结束 · 已停止', stopped:'已停止', stopped_confirmed:'已确认停稳', stopping:'正在确认停止', stop_unconfirmed:'停止尚未确认', command_failed:'试转指令失败', feedback_failed:'反馈异常后已停止', aborted:'试转已中止', timeout:'试转超时', disconnected:'已断开'};
     let motionText = active ? holding ? passed ? '验证成功 · 仍在保持' : '到位 · 保持验证中' : '正在前往目标' : motionResults[motion.result] || motion.result || '待机';
     let motionClass = active ? passed ? 'success' : 'warning' : 'muted';
+    if (skipped) { motionText = active ? '目标已下发 · 未判定' : '未判定 · 已停止'; motionClass = 'muted'; }
     if (warning) { motionText = '保持波动观察中'; motionClass = 'warning'; }
     if (motion.stop_required) { motionText = '停止尚未确认'; motionClass = 'error'; }
     $('motion-status').textContent = motionText;
     $('motion-status').className = `badge ${motionClass}`;
     $('safety-interlock').hidden = !motion.stop_required;
-    const results = {idle:['尚未试验','muted'],pending:['验证中','warning'],passed:['验证成功','success'],failed:['验证失败','error'],cancelled:['验证未完成 · 已中止','warning']};
+    const results = {idle:['尚未试验','muted'],pending:['验证中','warning'],passed:['验证成功','success'],skipped:['未进行终点判定','muted'],failed:['验证失败','error'],cancelled:['验证未完成 · 已中止','warning']};
     const result = results[outcome] || [outcome, 'muted'];
     $('trial-outcome').textContent = result[0];
     $('trial-outcome').className = `badge ${result[1]}`;
@@ -355,6 +357,7 @@
     else if (passed) description = `已通过连续 ${verifySeconds} 秒保持验证。当前保持已结束；停止后的回位不覆盖这次试验结果。`;
     else if (outcome === 'failed') description = '本次到位或保持验证失败；查看停止原因及试验误差，停止后的实际位置请看实时反馈。';
     else if (outcome === 'cancelled') description = '验证完成前已中止，不能据此判定通过。停止后的实际位置请看实时反馈。';
+    if (skipped) description = '本次双轴指令未启用终点判定；不判断到位、到位超时或保持误差。实际位置与速度以采样为准，不代表已到位。';
     if (warning) description += ' 当前异常尚在持续性观察中，未发送停止；恢复稳定前暂不切换下一角度。';
     if (motion.stop_required) description = `${passed ? `先前已通过连续 ${verifySeconds} 秒保持验证。` : '试验已中断。'}停止尚未确认，当前输出与保持状态未知；请检查实际运动并尝试停止。`;
     $('trial-description').textContent = description;
@@ -369,6 +372,7 @@
     const delay = number(motion.hold_guard_delay_s) ? motion.hold_guard_delay_s : 0.5;
     const minSamples = motion.hold_guard_min_samples || 3;
     $('hold-guard-policy').textContent = `普通波动连续 ≥${minSamples} 个采样且持续 ≥${delay} 秒才停止；误差达到 ±${motion.hold_hard_error_deg || 1}°或速度达到 ±${motion.hold_hard_speed_deg_s || 10}°/s 立即停止。故障、掉线保护不延迟。`;
+    if (skipped) $('hold-guard-policy').textContent = '本次不进行到位和保持判定；故障、通信、心跳及手动停止仍生效。';
     const lastWarning = motion.last_hold_warning;
     $('hold-warning').hidden = !warning && !lastWarning;
     $('hold-warning').textContent = warning
@@ -464,8 +468,7 @@
       $('move-speed').value = limits.default_speed_deg_s || 18;
       targetInitialized = true;
     }
-    const range = number(limits.min_deg) && number(limits.max_deg) ? ` · 行程 ${fmt(limits.min_deg)}° 至 ${fmt(limits.max_deg)}°` : '';
-    $('motion-limits').textContent = `单次位移 ≤ ${limits.max_test_delta_deg || 10}° · 速度 ≤ ${limits.max_test_speed_deg_s || 60}°/s${range}`;
+    $('motion-limits').textContent = `无配置行程或单次位移限制 · 原始角 0～359.99° · 速度 ≤ ${limits.max_test_speed_deg_s || 60}°/s`;
     renderMotion();
     const added = state.readings || [];
     for (const reading of added) {
@@ -681,12 +684,11 @@
     if ($('move-target').value.trim() === '' || !Number.isFinite(target)) error = '请输入有效的绝对目标角度。';
     else if ($('move-speed').value.trim() === '' || !Number.isFinite(speed) || speed <= 0 || speed > (limits.max_test_speed_deg_s || 60)) error = `试转速度必须大于 0 且不超过 ${limits.max_test_speed_deg_s || 60}°/s。`;
     else if (!number(state?.latest?.angle_deg)) error = '尚未获得当前位置，无法执行试转。';
-    else if (Math.abs(target - state.latest.angle_deg) > (limits.max_test_delta_deg || 10) + 1e-6) error = `目标距当前位置超过 ${limits.max_test_delta_deg || 10}°，请减小单次位移。`;
-    else if ((number(limits.min_deg) && target < limits.min_deg) || (number(limits.max_deg) && target > limits.max_deg)) error = '目标角度超出配置的安全行程。';
+    else if (target < 0 || target > 359.99) error = '原始目标角必须在0～359.99°范围内。';
     if (error) { showMessage(error); return; }
     const button = event.currentTarget;
     const nextAngle = state?.motion?.active && state.motion.phase === 'holding' && state.motion.trial_outcome === 'passed';
-    const transition = nextAngle ? '当前保持不中途停止，直接前往新目标；服务端会用最新实测角度重新检查单次位移与限位。\n' : '';
+    const transition = nextAngle ? '当前保持不中途停止，直接前往新目标；服务端会用最新实测反馈检查电机状态。\n' : '';
     if (!await confirmAction(nextAngle ? '前往下一角度？' : '试转并持续保持目标？', `${transition}从当前反馈 ${fmt(state?.latest?.angle_deg)}° 前往 ${target}°，速度上限 ${speed}°/s。\n每个目标到位后连续 3 秒满足误差 ±0.2°、速度 ≤1°/s 才显示验证成功，未通过验证的阶段最多 30 秒。通过后持续保持，不按 30 秒停止；可再输入下一角度。\n手动停止、断开连接、保持失败、故障或浏览器心跳中断 3 秒后会尝试停止；停止后保持输出可能解除，机械臂可能回位。请先支撑所选关节、清空行程，并留在页面观察。`, nextAngle ? '确认前往下一角度' : '确认试转并保持')) return;
     await runAction(button, '/api/move', {target_deg: target, speed_deg_s: speed}, `已提交${nextAngle ? '下一角度' : '试转'}：目标 ${target}°，速度 ${speed}°/s；到位后重新验证 3 秒，通过后持续保持。`);
   });

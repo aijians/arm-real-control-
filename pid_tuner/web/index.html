@@ -77,10 +77,10 @@
         </section>
 
         <section class="card motion-card">
-          <div class="card-heading"><div><p class="eyebrow">SINGLE MOVE</p><h2>单次小幅试转</h2></div><span id="motion-status" class="badge muted">待机</span></div>
+          <div class="card-heading"><div><p class="eyebrow">SINGLE MOVE</p><h2>单轴试转</h2></div><span id="motion-status" class="badge muted">待机</span></div>
           <p class="motion-hint">先支撑所选关节、清空行程。到位后连续验证 3 秒，通过后持续保持原目标，可直接输入下一角度。每个新目标重新验证，不发送返回起点指令。</p><p id="ram-ack-notice" class="motion-hint" hidden>RAM 写入已收到成功应答，运行参数未独立读回。试转需人工触发；先用当前位置附近 2° 小幅验证，观察抖动、温升与输出后再决定是否保存。</p>
           <div class="motion-inputs"><label>目标位置 <span>° · 原始电机角，不应用 offset</span><div class="input-unit"><input id="move-target" type="number" step="0.1" inputmode="decimal" placeholder="先读取位置" disabled><button id="use-current" title="填入当前反馈角度" disabled>取当前位置</button></div></label><label>试转速度 <span>°/s</span><input id="move-speed" type="number" min="0.1" max="60" step="0.1" value="18" inputmode="decimal" disabled></label></div>
-          <div class="motion-boundary" id="motion-limits">单次位移 ≤ 10° · 速度 ≤ 60°/s</div>
+          <div class="motion-boundary" id="motion-limits">无配置行程或单次位移限制 · 原始角 0～359.99° · 速度 ≤ 60°/s</div>
           <div class="motion-actions"><button id="enable" class="button secondary" disabled>使能电机</button><button id="move" class="button primary" disabled>▶ 试转并保持观察</button><button id="stop" class="button stop" disabled><span aria-hidden="true">■</span> 停止电机</button></div>
           <div id="trial-panel" class="trial-panel" aria-live="polite">
             <div class="trial-heading"><strong>本次试验结果</strong><span id="trial-outcome" class="badge muted">尚未试验</span></div>

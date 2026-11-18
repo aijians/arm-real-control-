@@ -395,8 +395,7 @@ class HoldLifecycleTests(unittest.TestCase):
         self.feedback(angle=self.target + .1)
         original = copy.deepcopy(self.tuner.motion)
         cases = [
-            (159.9, 18., {}),  # More than 10 degrees from latest 170.1.
-            (180.01, 18., {}), (-.01, 18., {}),
+            (360., 18., {}), (-.01, 18., {}),
             (172., 60.01, {}), (172., 0., {}),
             (float('nan'), 18., {}), (172., float('inf'), {}),
         ]

@@ -38,7 +38,7 @@
     const verified = !Object.values(s?.pid_status || {}).some(v => ['write_pending','write_unverified','rom_unverified','changed_on_device'].includes(v));
     return s?.connected && s.latest?.motor_state === 0 && !s.latest?.error_state && number(s.latest?.angle_deg)
       && s.last_feedback_age_s <= 1 && !m?.stop_required && verified
-      && (!m?.active || (m.phase === 'holding' && m.trial_outcome === 'passed' && !m.hold_warning));
+      && (!m?.active || m.phase === 'unverified' || (m.phase === 'holding' && m.trial_outcome === 'passed' && !m.hold_warning));
   }
   function render(next) {
     state = next;
@@ -47,24 +47,26 @@
     $('dual-connect').disabled = busy || axes.every(a => state.axes[a].connected);
     $('dual-disconnect').disabled = busy || !axes.some(a => state.axes[a].connected);
     $('dual-move').disabled = busy || !axes.every(canMove);
+    $('dual-verify-endpoint').disabled = busy;
+    $('dual-move').textContent = $('dual-verify-endpoint').checked ? '▶ 同时试转并判定' : '▶ 同时试转（不判定）';
     $('dual-current').disabled = busy || !axes.every(a => state.axes[a].connected && number(state.axes[a].latest?.angle_deg));
     for (const axis of axes) {
       const s = state.axes[axis], m = s.motion || {}, latest = s.latest || {};
-      $(`${axis}-status`).textContent = m.stop_required ? '停止未确认' : m.active ? (m.phase === 'holding' ? '保持中':'移动中') : s.connected ? '已连接':'未连接';
+      $(`${axis}-status`).textContent = m.stop_required ? '停止未确认' : m.active ? (m.phase === 'unverified' ? '未判定 · 采样中' : m.phase === 'holding' ? '保持中':'移动中') : s.connected ? '已连接':'未连接';
       $(`${axis}-device`).textContent = `${s.connection.device} · ID ${s.connection.motor_id}`;
       $(`${axis}-angle`).textContent = fmt(latest.angle_deg);
       $(`${axis}-speed`).textContent = `${fmt(latest.speed_deg_s)} °/s`;
-      $(`${axis}-limits`).textContent = `限位 ${s.limits.min_deg}° ～ ${s.limits.max_deg}° · 单次 ≤10°`;
+      $(`${axis}-limits`).textContent = '无配置行程或单次位移限制 · 原始角 0～359.99°';
       $(`${axis}-target`).min = s.limits.min_deg; $(`${axis}-target`).max = s.limits.max_deg;
       if (number(latest.angle_deg) && !initialized.has(axis)) {
         $(`${axis}-target`).value = latest.angle_deg.toFixed(2); initialized.add(axis);
       }
-      $(`${axis}-target`).disabled = busy || (m.active && !(m.phase === 'holding' && m.trial_outcome === 'passed'));
+      $(`${axis}-target`).disabled = busy || (m.active && m.phase !== 'unverified' && !(m.phase === 'holding' && m.trial_outcome === 'passed'));
       $(`${axis}-move-speed`).disabled = $(`${axis}-target`).disabled;
-      const status = {pending:'验证中',passed:'保持验证通过',failed:'试转失败',cancelled:'试转已取消'}[m.trial_outcome] || '待机';
+      const status = {pending:'验证中',passed:'保持验证通过',skipped:'未进行终点判定',failed:'试转失败',cancelled:'试转已取消'}[m.trial_outcome] || '待机';
       $(`${axis}-result`).textContent = `${status}${number(m.target_deg) ? ` · 目标 ${fmt(m.target_deg)}°`:''}${s.last_error ? ` · ${s.last_error}`:''}`;
     }
-    $('dual-group').textContent = state.group.stop_reason || ({preparing:'双轴检查与下发中',running:'双轴正在试转',holding:'双轴均已验证通过，持续保持',stopped:'双轴已停止',stop_unconfirmed:'双轴停止尚未全部确认'}[state.group.result] || '双轴待机');
+    $('dual-group').textContent = state.group.stop_reason || ({preparing:'双轴检查与下发中',running:'双轴正在试转',unverified:'目标已下发，未进行终点判定；持续采样，可下发下一组目标',holding:'双轴均已验证通过，持续保持',stopped:'双轴已停止',stop_unconfirmed:'双轴停止尚未全部确认'}[state.group.result] || '双轴待机');
     if (!framesLoaded) {
       framesLoaded = true;
       for (const axis of axes) $(`frame-${axis}`).src = `/axis/${axis}#token=${encodeURIComponent(token)}`;
@@ -95,23 +97,27 @@
   };
   $('dual-move').onclick = () => {
     const targets = {};
+    const verify_endpoint = $('dual-verify-endpoint').checked;
     for (const axis of axes) {
       const target = Number($(`${axis}-target`).value), speed = Number($(`${axis}-move-speed`).value);
       const s = state?.axes?.[axis];
       if (!$(`${axis}-target`).value.trim() || !$(`${axis}-move-speed`).value.trim() || !number(target) || !number(speed) || speed <= 0 || speed > 60
-          || !s || target < s.limits.min_deg || target > s.limits.max_deg || Math.abs(target - s.latest.angle_deg) > 10 + 1e-6) {
-        message(`${labels[axis]}目标需在配置限位内、距离当前位置不超过10°，速度为0～60°/s（不含0）。`,true); return;
+          || !s || target < 0 || target > 359.99) {
+        message(`${labels[axis]}原始目标角需为0～359.99°，速度为0～60°/s（不含0）。`,true); return;
       }
       targets[axis] = {target_deg:target,speed_deg_s:speed};
     }
-    $('dual-confirm-text').textContent = axes.map(a => `${labels[a]}：${targets[a].target_deg}°，${targets[a].speed_deg_s}°/s`).join('\n') + '\n两轴将并发下发，各自到位验证后持续保持。任一轴失败会停止双轴。确认行程已清空、机械臂已支撑，并留在页面观察。';
+    $('dual-confirm-text').textContent = axes.map(a => `${labels[a]}：${targets[a].target_deg}°，${targets[a].speed_deg_s}°/s`).join('\n')
+      + (verify_endpoint ? '\n进行终点判定：各自到位验证后持续保持。' : '\n不进行终点判定：下发后持续采样，不判断到位或保持误差，可继续下发下一组目标。未判定不表示已到位。')
+      + '\n两轴并发下发；驱动故障、通信或心跳中断仍停止双轴。请留在页面观察。';
     const dialog = $('dual-confirm');
     dialog.returnValue = '';
     dialog.addEventListener('close',() => {
-      if (dialog.returnValue === 'confirm') action('/api/dual/move',{targets},'双轴试转已下发；到位后分别验证并保持。');
+      if (dialog.returnValue === 'confirm') action('/api/dual/move',{targets,verify_endpoint},verify_endpoint ? '双轴试转已下发；到位后分别验证并保持。' : '双轴目标已下发；未进行终点判定，持续采样。');
     },{once:true});
     dialog.showModal();
   };
+  $('dual-verify-endpoint').onchange = () => { if (state) render(state); };
   for (const axis of axes) $(`tab-${axis}`).onclick = () => {
     for (const other of axes) {
       $(`frame-${other}`).hidden = other !== axis;

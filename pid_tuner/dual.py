@@ -1,4 +1,4 @@
-"""Two existing tuners, one shared runtime lease and bounded paired commands."""
+"""Two existing tuners, one shared runtime lease and paired commands."""
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import copy
@@ -152,8 +152,10 @@ class DualTuner:
             if errors:
                 raise RuntimeError(self._error(errors))
 
-    def move_both(self, targets):
+    def move_both(self, targets, verify_endpoint=True):
         generation = self._generation
+        if type(verify_endpoint) is not bool:
+            raise ValueError('verify_endpoint必须是布尔值')
         if not isinstance(targets, dict) or set(targets) != set(self.axes):
             raise ValueError('必须同时提供upper和lower目标')
         for values in targets.values():
@@ -166,6 +168,7 @@ class DualTuner:
             gate = self._gate = threading.Barrier(2)
             with self._state:
                 self.group = {'id': uuid.uuid4().hex, 'active': True, 'result': 'preparing',
+                              'verify_endpoint': verify_endpoint,
                               'targets': copy.deepcopy(targets), 'requested_at': time.time()}
             def launch(axis):
                 tuner = self.axes[axis]
@@ -177,7 +180,7 @@ class DualTuner:
                         raise InterruptedError('双轴试转已取消')
                 try:
                     tuner._event('双轴试转请求', group_id=self.group['id'])
-                    tuner.move(**targets[axis], start_gate=ready)
+                    tuner.move(**targets[axis], start_gate=ready, verify_endpoint=verify_endpoint)
                 except BaseException:
                     gate.abort()
                     raise
@@ -191,7 +194,7 @@ class DualTuner:
                     self.last_error = reason
                 raise RuntimeError(reason)
             with self._state:
-                self.group.update(result='running')
+                self.group.update(result='running' if verify_endpoint else 'unverified')
             self.last_error = None
 
     def monitor_once(self):
@@ -210,6 +213,9 @@ class DualTuner:
                 if not self.group.get('active'):
                     return
             self.stop_all('/'.join(failed) + '联动异常，停止双轴')
+        elif all(t.motion.get('trial_outcome') == 'skipped' for t in self.axes.values()):
+            with self._state:
+                self.group['result'] = 'unverified'
         elif all(t.motion.get('trial_outcome') == 'passed' for t in self.axes.values()):
             with self._state:
                 self.group['result'] = 'holding'

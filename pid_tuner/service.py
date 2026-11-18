@@ -30,7 +30,7 @@ HOLD_HARD_SPEED_DEG_S = 10.
 
 def idle_motion():
     return {'active': False, 'target_deg': None, 'speed_deg_s': None,
-            'result': 'idle', 'phase': 'idle', 'stop_required': False,
+            'result': 'idle', 'phase': 'idle', 'stop_required': False, 'verify_endpoint': True,
             'trial_id': None, 'trial_outcome': None, 'stop_reason': None,
             'start_deg': None, 'last_trial_error_deg': None,
             'last_trial_speed_deg_s': None, 'hold_peak_speed_deg_s': 0.,
@@ -74,10 +74,10 @@ class Tuner:
         self.connection['angle_space'] = 'motor_raw'
         self._settings_backup = None
         self._settings_save_reference = None
-        raw_limits = sorted(motor['offset_deg'] + motor['sign']*motor['ratio']*q
-                            for q in motor['limits_deg'])
-        self.limits = {'min_deg': raw_limits[0], 'max_deg': raw_limits[1],
-                       'max_test_delta_deg': 10., 'max_test_speed_deg_s': 60.,
+        # Only the A6 packet's raw single-turn range applies in this console.
+        # Robot task limits remain in the independent production controller.
+        self.limits = {'min_deg': 0., 'max_deg': 359.99,
+                       'max_test_delta_deg': None, 'max_test_speed_deg_s': 60.,
                        'default_speed_deg_s': min(60., config['hardware']['max_speed_deg_s'])}
         self.runtime_dir = Path(paths['runtime_dir'])
         self.audit_dir = self.runtime_dir / 'pid_tuner' / mode
@@ -526,12 +526,12 @@ class Tuner:
             self._event(f'已显式发送{self.axis_label}使能命令0x88')
             self._persist()
 
-    def move(self, target_deg, speed_deg_s, *, start_gate=None):
+    def move(self, target_deg, speed_deg_s, *, start_gate=None, verify_endpoint=True):
         generation = self._stop_generation
+        if type(verify_endpoint) is not bool:
+            raise ValueError('verify_endpoint必须是布尔值')
         target = number(target_deg, '目标角度')
         speed = number(speed_deg_s, '试转速度')
-        if not self.limits['min_deg'] <= target <= self.limits['max_deg']:
-            raise ValueError(f'目标角度超出{self.axis_label}配置限位')
         if not 0 < speed <= self.limits['max_test_speed_deg_s']:
             raise ValueError('试转速度必须大于0且不超过60°/s')
         motor_target_deg, motor_speed = motor_command(self.connection, target, speed)
@@ -543,8 +543,9 @@ class Tuner:
         with self._ops:
             self._require()
             self._check_cancel()
-            retarget = (self.motion['active'] and self.motion.get('phase') == 'holding'
-                        and self.motion.get('trial_outcome') == 'passed'
+            retarget = (self.motion['active']
+                        and ((self.motion.get('phase') == 'holding' and self.motion.get('trial_outcome') == 'passed')
+                             or self.motion.get('phase') == 'unverified')
                         and not self.motion.get('stop_required'))
             if not retarget:
                 self._idle()
@@ -561,8 +562,6 @@ class Tuner:
                 feedback_reason = '驱动器存在故障，不能试转：'+','.join(row['error_flags'])
             elif row['motor_state'] != 0:
                 feedback_reason = f'{self.axis_label}处于关闭状态，请先显式使能'
-            elif not self.limits['min_deg'] <= row['angle_deg'] <= self.limits['max_deg']:
-                feedback_reason = '实测角度超出配置限位，请先停止检查'
             elif not retarget and abs(row['speed_deg_s']) > 1:
                 feedback_reason = f'当前{self.axis_label}尚未停稳'
             elif retarget and time.monotonic()-self._last_client > 3:
@@ -574,7 +573,7 @@ class Tuner:
                     self.motion['hold_peak_error_deg'] = max(self.motion.get('hold_peak_error_deg') or 0., abs(old_error))
                     self._abort_trial(feedback_reason)
                 raise ValueError(feedback_reason)
-            if retarget:
+            if retarget and self.motion.get('verify_endpoint', True):
                 feedback_reason = self._hold_guard(row, time.monotonic())
                 if feedback_reason:
                     self._abort_trial(feedback_reason)
@@ -582,17 +581,16 @@ class Tuner:
                 if self.motion.get('hold_warning'):
                     raise ValueError('保持反馈正在波动观察，暂不切换下一角度；恢复稳定后再操作')
             delta = target-row['angle_deg']
-            if abs(delta) > self.limits['max_test_delta_deg']:
-                raise ValueError('单次试转与最新实测角度之差不能超过10°')
             previous = None
             if retarget:
                 old_error = row['angle_deg']-self.motion['target_deg']
                 previous = self._motion_snapshot()
                 previous.pop('previous_trial', None)  # Keep repeated retargets from nesting snapshots.
                 previous.update(active=False, phase='superseded', last_trial_error_deg=old_error)
-                self._event('保持中切换下一角度；不发送停止或返回起点', previous_trial=previous,
+                self._event('切换下一角度；不发送停止或返回起点', previous_trial=previous,
                             from_deg=row['angle_deg'], target_deg=target, speed_deg_s=speed)
-            self._event('准备单次试转', from_deg=row['angle_deg'], target_deg=target, speed_deg_s=speed)
+            self._event('准备单次试转', from_deg=row['angle_deg'], target_deg=target, speed_deg_s=speed,
+                        verify_endpoint=verify_endpoint)
             try:
                 self._persist()
             except BaseException as exc:
@@ -604,6 +602,7 @@ class Tuner:
             self.motion = {**idle_motion(), 'active': True, 'target_deg': target, 'speed_deg_s': speed,
                            'start_deg': row['angle_deg'], 'trial_id': uuid.uuid4().hex,
                            'previous_trial': previous,
+                           'verify_endpoint': verify_endpoint,
                            'trial_outcome': 'pending', 'result': 'running', 'phase': 'running',
                            'last_trial_error_deg': -delta,
                            'last_trial_speed_deg_s': row['speed_deg_s'],
@@ -617,6 +616,10 @@ class Tuner:
                     start_gate()
                     self._check_cancel(generation)
                 self._device.move(target, speed, row['motor_angle_deg'])
+                if not verify_endpoint:
+                    self.motion.update(trial_outcome='skipped', result='unverified', phase='unverified')
+                    self._event('试转已下发；未进行终点判定，继续采样', trial=self._motion_snapshot())
+                    self._persist()
             except BaseException:
                 self.motion.update(trial_outcome='failed', stop_reason='试转命令未确认')
                 try:
@@ -707,10 +710,12 @@ class Tuner:
             reason = '驱动故障：'+','.join(row['error_flags'])
         elif row['motor_state'] != 0:
             reason = '电机已关闭，目标保持中断'
-        elif not self.limits['min_deg'] <= row['angle_deg'] <= self.limits['max_deg']:
-            reason = '实测角度超出配置限位'
         elif now-self._last_client > 3:
             reason = '浏览器心跳中断超过3秒'
+        elif not self.motion.get('verify_endpoint', True):
+            # Telemetry/fault/heartbeat checks above remain active. Neither
+            # arrival deadlines nor target-relative hold guards apply here.
+            return
         elif self.motion.get('phase') == 'holding':
             reason = self._hold_guard(row, now)
             if reason is None:
