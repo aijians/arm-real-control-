@@ -28,7 +28,7 @@ bash run_pid_tuner.sh --axis both --real --pause-sal --host 0.0.0.0 --port 8765
 
 ## 每次任务启动前写入 PID RAM（2026-11-12）
 
-`hardware.task_start_pid.enabled=true`：每份TXT成功解析后、相机及运动任务开始前，在主任务锁和两轴独占串口内先停止并确认双轴停稳，再通过0x42依次写角度/速度环。按2026-11-17用户指定，大臂角度环550/30/0、小臂角度环50/0/0，两轴速度环均500/25/0（均Kp/Ki/Kd）。同一常驻程序接收下一份任务时会重新写入，阶段重试和往返中的每段运动不重复写。空闲启动或没有有效任务时不打开串口、不写PID。
+`hardware.task_start_pid.enabled=true`：每份TXT成功解析后、相机及运动任务开始前，在主任务锁和两轴独占串口内先停止并确认双轴停稳，再通过0x42依次写角度/速度环。按2026-11-18用户指定，两轴角度环均50/0/0，大臂速度环550/30/0、小臂速度环500/25/0（均Kp/Ki/Kd）。同一常驻程序接收下一份任务时会重新写入，阶段重试和往返中的每段运动不重复写。空闲启动或没有有效任务时不打开串口、不写PID。
 
 在 `config/robot.json` 的 `hardware.task_start_pid` 中选择 `"enabled": true`（加载配置中的四环PID）或 `"enabled": false`（跳过PID初始化）。关闭时不加载PID写入设备、不执行PID初始化停机或写入，日志显示 `PID RAM initialization disabled; keeping drive PID`，结果记录 `pid_initialization.status="disabled"`、`writes=[]`；相机和正常任务继续运行。省略整个 `task_start_pid` 也默认关闭。关闭只保留驱动当前PID，不会清空PID、恢复旧参数或恢复出厂值。修改配置后重新启动 `run.sh` 生效；当前仍保持开启和上述数值。
 
