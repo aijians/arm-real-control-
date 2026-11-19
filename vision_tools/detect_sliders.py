@@ -85,7 +85,7 @@ def _read_image(image_path):
     return image
 
 
-def _build_color_masks(patch):
+def _build_color_masks(patch, *, recover_shaded_blue=False):
     """结合 HSV、CIE LAB 与 RGB 通道差提取蓝色与橙色滑杆掩膜（含圆柱表面高光条补偿）。"""
     hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
     lab = cv2.cvtColor(patch, cv2.COLOR_BGR2LAB)
@@ -102,6 +102,15 @@ def _build_color_masks(patch):
         (hsv[:, :, 1] >= 165) & (hsv[:, :, 2] >= 180) &
         ((b - r) >= 150) & (lab[:, :, 2] <= 116)
     )
+    if recover_shaded_blue:
+        # The registered ROI constrains the rail view. Keep blue silhouette
+        # pixels at the shaded flank that the historical high-contrast mask
+        # drops while retaining the hue and chroma tests at the background.
+        is_core_blue |= (
+            (hsv[:, :, 0] >= 99) & (hsv[:, :, 0] <= 132) &
+            (hsv[:, :, 1] >= 63) & (hsv[:, :, 2] >= 65) &
+            (b - g >= 24) & (b - r >= 30) & (lab[:, :, 2] <= 113)
+        )
     blue_mask = (is_core_blue | is_specular_blue).astype(np.uint8) * 255
 
     orange_mask = (
@@ -520,7 +529,7 @@ def _width_model(cfg, out_key, u):
     return width if width > 4.0 else None
 
 
-def _measure_rod(rows, out_key, cfg, near_side_occluded=None):
+def _measure_rod(rows, out_key, cfg, near_side_occluded=None, *, use_tangent=False):
     """由测量带内逐行轮廓求杆轴像素 x，并给出可靠性判断。"""
     min_rows = int(cfg.get("min_rod_rows", 8))
     tol = float(cfg.get("width_tolerance_ratio", 0.2))
@@ -551,7 +560,17 @@ def _measure_rod(rows, out_key, cfg, near_side_occluded=None):
             reasons.append("rod_width_inconsistent_with_model")
         return mid, reliable, reasons, info
 
-    far = _trimmed_mean(rights if near_side_occluded == "left" else lefts)
+    visible = rights if near_side_occluded == "left" else lefts
+    if use_tangent:
+        # Mask positions are pixel centres. The silhouette is at the outer
+        # boundary of the last covered pixel, on the side away from the blocker.
+        side = "right" if near_side_occluded == "left" else "left"
+        offset = 0.5 if side == "right" else -0.5
+        info.update(method="rod_band_far_edge_tangent", visible_side=side,
+                    edge_pixels=[[float(x + offset), row[0]] for x, row in zip(visible, usable)])
+        return mid, True, reasons, info
+
+    far = _trimmed_mean(visible)
     sign = -1.0 if near_side_occluded == "left" else 1.0
     axis = far + sign * 0.5 * (width - 1.0)
     model = None
@@ -619,7 +638,8 @@ def _needs_180_rotation(image_1080, roi, already_rotated):
     return rot_blue > up_blue and rot_blue >= 400
 
 
-def detect_frame(image, profile="ground", scene=None, already_rotated=False):
+def detect_frame(image, profile="ground", scene=None, already_rotated=False, *,
+                 use_tangent=False, reference_rail=None):
     """识别单帧 BGR 图像中的导轨真实两端点及蓝色、橙(黄)色滑杆坐标。"""
     active_profile = scene if scene is not None else profile
     if active_profile not in SCENES:
@@ -647,12 +667,16 @@ def detect_frame(image, profile="ground", scene=None, already_rotated=False):
     masks = _build_color_masks(patch)
 
     # 2. 结合滑块分界锚点、Peak 1 / 最强峰与共线 RANSAC 拟合导轨前挡边下沿直线 y = k * x + m
-    k, m = _detect_rail_line(work, base_cfg, masks=masks)
-    rail_line_source = "fitted"
-    if k is None or m is None:
-        x0, y0, k_nom = base_cfg["rail_nominal"]
-        k, m = float(k_nom), float(y0 - k_nom * x0)
-        rail_line_source = "nominal_fallback"
+    if reference_rail is not None:
+        k, m = reference_rail
+        rail_line_source = "registered_reference"
+    else:
+        k, m = _detect_rail_line(work, base_cfg, masks=masks)
+        rail_line_source = "fitted"
+        if k is None or m is None:
+            x0, y0, k_nom = base_cfg["rail_nominal"]
+            k, m = float(k_nom), float(y0 - k_nom * x0)
+            rail_line_source = "nominal_fallback"
 
     # 根据实测导轨在转正画面中的垂直高度自适应选择高斜率/重装参数或传统正向地面参数
     y_mid = k * 550.0 + m
@@ -695,6 +719,22 @@ def detect_frame(image, profile="ground", scene=None, already_rotated=False):
         block = _extract_merged_component(lower_mask, (x1, y1), min_area=200)
         ref_x = (block["bbox"][0], block["bbox"][2]) if block is not None else None
         rod = _extract_merged_component(upper_mask, (x1, y1), min_area=120, ref_x_range=ref_x)
+        if reference_rail is not None and out_key == "blue" and rod is not None:
+            # Expand only near an existing shaft component. The full image can
+            # contain blue wiring or reflection outside the selected rod.
+            center = rod["center"][0]
+            width = _width_model(cfg, out_key, center)
+            if width is not None:
+                shaded = _build_color_masks(patch, recover_shaded_blue=True)["blue"]
+                region = (upper_raw > 0) | ((np.abs(gx - center) <= .65 * width)
+                    & (gy < rail_y_grid - half_lip) & (gy >= rail_y_grid - 175.0))
+                expanded = np.where(region, shaded, 0).astype(np.uint8)
+                expanded = cv2.morphologyEx(expanded, cv2.MORPH_CLOSE, k_rod_horiz_close)
+                candidate = _extract_merged_component(expanded, (x1, y1), min_area=120, ref_x_range=ref_x)
+                if candidate is not None and abs(candidate["center"][0] - center) <= .3 * width:
+                    candidate_rows = _rod_band_rows(candidate, (x1, y1), k, m, band, x2 - x1)
+                    if _measure_rod(candidate_rows, out_key, cfg)[1]:
+                        rod = candidate
         if out_key == "blue" and (rod is not None or block is not None):
             src = rod if rod is not None else block
             blue_x_center = src["center"][0]
@@ -713,13 +753,14 @@ def detect_frame(image, profile="ground", scene=None, already_rotated=False):
         reasons, info, reliable = [], {}, False
         x_axis = None
         if rod is not None:
-            x_axis, reliable, reasons, info = _measure_rod(rows, out_key, cfg, near)
+            x_axis, reliable, reasons, info = _measure_rod(rows, out_key, cfg, near, use_tangent=use_tangent)
             if (x_axis is not None and near is None and out_key != front
                     and "rod_width_inconsistent_with_model" in reasons):
                 near_wide = _near_side_contact(rows, other_rows, 3.0 * gap)
                 if near_wide is not None and info.get("width_px") and info.get("width_model_px") \
                         and info["width_px"] < info["width_model_px"]:
-                    x_axis, reliable, reasons, info = _measure_rod(rows, out_key, cfg, near_wide)
+                    x_axis, reliable, reasons, info = _measure_rod(
+                        rows, out_key, cfg, near_wide, use_tangent=use_tangent)
                     reasons = reasons + ["occlusion_inferred_from_narrow_width"]
         if x_axis is not None:
             method = info.get("method", "rod_band_both_edges")
@@ -732,8 +773,12 @@ def detect_frame(image, profile="ground", scene=None, already_rotated=False):
             reasons = reasons + ["shaft_axis_not_measured"]
 
         y_axis = float(k * x_axis + m)
+        tangent = method == "rod_band_far_edge_tangent"
+        if tangent:
+            info["edge_pixels"] = [_map_point(point, (cw, ch), (ow, oh))
+                                   for point in info["edge_pixels"]]
         sliders[out_key] = {
-            "pixel_xy": _map_point((x_axis, y_axis), (cw, ch), (ow, oh)),
+            "pixel_xy": None if tangent else _map_point((x_axis, y_axis), (cw, ch), (ow, oh)),
             "reference_method": method,
             "representative_part": rep_part,
             "approximate": is_approx,

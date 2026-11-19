@@ -6,6 +6,7 @@ import time
 
 from .targets import normalize_task, TargetResolver
 from .config import push_correction_settings, verification_aggregation_settings
+from .vision import VisionFrameRejected
 
 
 class TaskError(RuntimeError):
@@ -21,6 +22,7 @@ def _finite_setting(value, name, minimum=0.):
 
 
 class TaskRunner:
+    _relative_leg = None
     _NO_RETRY = {"motion_halted", "stop_not_confirmed", "joint_feedback_out_of_limits",
                  "motion_goal_hold_hard_limit", "slider_overshot_target", "motion_already_running",
                  "verification_unreliable"}
@@ -35,6 +37,10 @@ class TaskRunner:
         verification = config["verification"]
         self.tolerance = float(verification["tolerance_mm"])
         self.verification_aggregation, self.verification_max_spread = verification_aggregation_settings(config)
+        self.relative_measurement = getattr(vision, "relative_measurement", False) is True
+        if self.relative_measurement and (self.verification_aggregation != "median"
+                or not 5 <= verification["samples"] <= 10):
+            raise ValueError("relative measurement requires median verification with 5 to 10 frames")
         window = verification.get("endpoint_window_mm", [self.tolerance, self.tolerance])
         if not isinstance(window, (list, tuple)) or len(window) != 2:
             raise ValueError("verification.endpoint_window_mm must be [under_mm, over_mm]")
@@ -149,15 +155,51 @@ class TaskRunner:
 
     def _band(self, color, goal):
         """返回 (under_mm, over_mm)：端点用端点窗口，中间目标用对称容差。"""
-        if self._endpoint_sign(color, goal) is not None:
+        if self._verification_end_sign(color, goal) is not None:
             return self.endpoint_window
         return self.tolerance, self.tolerance
+
+    def _verification_end_sign(self, color, goal):
+        if self._relative_leg is not None:
+            return self._relative_leg["stop_direction"]
+        return self._endpoint_sign(color, goal)
+
+    def _relative_details(self, actual):
+        ref = self._relative_leg
+        if ref is None:
+            return {}
+        return {"delta_x_mm": actual - ref["start_x_mm"],
+                **({"d_stop_mm": actual - ref["stop_ref_x_mm"]} if "stop_ref_x_mm" in ref else {})}
+
+    def _position_error(self, goal, actual):
+        if self._relative_leg is None:
+            return float(actual) - goal
+        if "stop_ref_x_mm" in self._relative_leg:
+            return float(actual) - self._relative_leg["stop_ref_x_mm"]
+        start = self._relative_leg["start_x_mm"]
+        return (float(actual) - start) - self._relative_leg["target_delta_x_mm"]
+
+    def _relative_references(self, task, goals, start):
+        """Freeze all references before the first motion; planning still uses model goals."""
+        color = task["color"]
+        references = []
+        for index, goal in enumerate(goals):
+            returning = task["intent"] == "push_round_trip" and index % 2 == 1
+            sign = None if returning else self._endpoint_sign(color, goal)
+            ref = {"start_x_mm": start, "target_delta_x_mm": 0. if returning else goal - start,
+                   "stop_direction": sign}
+            if sign is not None:
+                side = "right" if sign > 0 else "left"
+                measured = self.vision.stop_reference_x(color, side, self.verification_max_spread)
+                ref.update(stop_ref_x_mm=measured, target_delta_x_mm=measured - start)
+            references.append(ref)
+        return references
 
     def _signed_error(self, color, goal, actual, sign=None):
         """沿推动方向的有符号误差：负值为欠推，正值为越过目标。"""
         if sign is None:
-            sign = self._endpoint_sign(color, goal) or 1
-        return sign * (float(actual) - goal)
+            sign = self._verification_end_sign(color, goal) or 1
+        return sign * self._position_error(goal, actual)
 
     def _sample_reliability(self, state, color):
         """单帧可靠性：目标杆识别可靠，且另一根（本任务不推）杆相对初始读数未漂移。"""
@@ -165,6 +207,12 @@ class TaskRunner:
         own = reliability.get(color, {})
         reliable = bool(own.get("reliable", True))
         reasons = list(own.get("reasons", []))
+        if (self._relative_leg is not None and "stop_ref_x_mm" in self._relative_leg
+                and own.get("measurement_reliable") is True
+                and "reading_beyond_physical_stop" in reasons):
+            reliable = True
+            reasons.remove("reading_beyond_physical_stop")
+            reasons.append("nominal_limit_disagrees_with_calibrated_stop")
         for other, reference in getattr(self, "reference_positions", {}).items():
             if other == color or other not in state.get("sliders_x_mm", {}):
                 continue
@@ -180,9 +228,9 @@ class TaskRunner:
     def _verify(self, color, goal, after, sign=None):
         """Fresh reliable frames, with bounded reads and optional stable median."""
         if sign is None:
-            sign = self._endpoint_sign(color, goal) or 1
+            sign = self._verification_end_sign(color, goal) or 1
         under, over = self._band(color, goal)
-        endpoint = self._endpoint_sign(color, goal) is not None
+        endpoint = self._verification_end_sign(color, goal) is not None
         needed = int(self.config["verification"]["samples"])
         max_reads = needed + getattr(self, "unreliable_extra_samples", 0)
         samples, reliable_states = [], []
@@ -192,9 +240,16 @@ class TaskRunner:
                 break
             if i:
                 time.sleep(float(self.config["verification"]["interval_s"]))
-            state = self.vision.read(after_monotonic_s=after)
+            try:
+                state = self.vision.read(after_monotonic_s=after)
+            except VisionFrameRejected as exc:
+                if self._relative_leg is None:
+                    raise
+                samples.append({"reliable": False, "reasons": [str(exc)]})
+                reliable_states.clear()
+                continue
             actual = float(state["sliders_x_mm"][color])
-            error = actual - goal
+            error = self._position_error(goal, actual)
             reliable, reasons = self._sample_reliability(state, color)
             if reliable and endpoint and sign * error > over:
                 # 端点任务读数越过物理终点余量：实体不可能越过止挡，按视觉不可靠处理。
@@ -202,14 +257,17 @@ class TaskRunner:
                 reasons.append("reading_beyond_target_end_window")
             samples.append({"error_mm": error, "x_mm": actual,
                             "stamp_monotonic_s": state["stamp_monotonic_s"],
-                            "reliable": reliable, "reasons": reasons})
+                            "reliable": reliable, "reasons": reasons,
+                            **self._relative_details(actual)})
             if reliable:
                 reliable_states.append(state)
+            elif self._relative_leg is not None:
+                reliable_states.clear()
             after = state["stamp_monotonic_s"]
         result = {"samples": samples, "window_mm": [under, over], "direction_sign": sign,
                   "reliable_samples": len(reliable_states), "unreliable": False, "forced": False}
         if len(reliable_states) >= needed:
-            errors = [sign * (float(s["sliders_x_mm"][color]) - goal) for s in reliable_states]
+            errors = [sign * self._position_error(goal, s["sliders_x_mm"][color]) for s in reliable_states]
             if self.verification_aggregation == "median":
                 positions = [float(s["sliders_x_mm"][color]) for s in reliable_states]
                 median = statistics.median(positions)
@@ -218,16 +276,17 @@ class TaskRunner:
                 observed = copy.deepcopy(reliable_states[-1])
                 observed["raw_last_sliders_x_mm"] = dict(observed["sliders_x_mm"])
                 observed["sliders_x_mm"][color] = median
+                error_median = sign * self._position_error(goal, median)
                 result.update(aggregation="median", median_x_mm=median,
-                    median_signed_error_mm=sign * (median - goal), spread_mm=spread,
+                    median_signed_error_mm=error_median, spread_mm=spread,
                     max_spread_mm=self.verification_max_spread, stable=stable,
-                    passed=stable and -under <= sign * (median - goal) <= over,
-                    last_observation=observed)
+                    passed=stable and -under <= error_median <= over,
+                    last_observation=observed, **self._relative_details(median))
                 if not stable:
                     result.update(unreliable=True,
                                   unreliable_reasons=["verification_position_unstable"])
                 print("[vision] median %s: x=%.3f mm, error=%.3f mm, spread=%.3f mm; %s" %
-                      (color, median, sign * (median - goal), spread,
+                      (color, median, error_median, spread,
                        "passed" if result["passed"] else "not passed"), flush=True)
                 return result
             result.update(passed=all(-under <= e <= over for e in errors),
@@ -235,7 +294,7 @@ class TaskRunner:
             return result
         result["unreliable_reasons"] = sorted({r for s in samples if not s["reliable"]
                                                for r in s["reasons"]})
-        if getattr(self, "force_pass_unreliable", False) and state is not None:
+        if self._relative_leg is None and getattr(self, "force_pass_unreliable", False) and state is not None:
             # 配置强制通过：视为已到目标并进入下一阶段，状态中的目标杆位置取任务目标。
             observation = copy.deepcopy(state)
             observation["sliders_x_mm"] = dict(observation["sliders_x_mm"])
@@ -428,7 +487,7 @@ class TaskRunner:
                 state.update(verification["last_observation"])
                 if verification["passed"]:
                     return verification, None
-                signed = sign * (state["sliders_x_mm"][color] - goal)
+                signed = self._signed_error(color, goal, state["sliders_x_mm"][color], sign)
                 if signed > over:
                     raise TaskError("slider_overshot_target")
                 if signed >= -under:
@@ -449,7 +508,7 @@ class TaskRunner:
             if not verification["passed"]:
                 actual = state["sliders_x_mm"][color]
                 # 仅可靠帧可到达此处（不可靠已在 _stopped_push 中报 verification_unreliable）。
-                if sign * (actual - goal) > over:
+                if self._signed_error(color, goal, actual, sign) > over:
                     raise TaskError("slider_overshot_target")
                 if require_progress and sign * (actual - before) < self.correction_settings["min_progress_mm"]:
                     raise TaskError("push_no_progress")
@@ -475,7 +534,7 @@ class TaskRunner:
         sign = 1 if direction == "+x" else -1
         before = float(state["sliders_x_mm"][color])
         under, over = self._band(color, goal)
-        signed = sign * (before - goal)
+        signed = self._signed_error(color, goal, before, sign)
         if signed > over:
             raise TaskError("slider_overshot_target")
         if signed >= -under:
@@ -500,7 +559,7 @@ class TaskRunner:
             raise error
         if not verification["passed"]:
             raise TaskError("slider_not_at_target_after_single_recovery", {
-                "remaining_mm": sign * (goal - correction["after_x_mm"]),
+                "remaining_mm": -self._signed_error(color, goal, correction["after_x_mm"], sign),
                 "recovery_count": 1, "extension_mm": 1.})
         state["q_rad"] = self.motors.read_state()["q_rad"]
         return state
@@ -536,7 +595,7 @@ class TaskRunner:
             if error is not None:
                 raise error
             under, over = self._band(color, goal)
-            signed = sign * (actual - goal)
+            signed = self._signed_error(color, goal, actual, sign)
             remaining = -signed
             if signed > over:
                 raise TaskError("slider_overshot_target")
@@ -587,6 +646,8 @@ class TaskRunner:
 
     def _run_leg(self, color, goal):
         record = {"color": color, "target_x_mm": goal, "attempts": [], "status": "failed"}
+        if self._relative_leg is not None:
+            record["relative_reference"] = dict(self._relative_leg)
         attempt = {"attempt": 0}
         record["attempts"].append(attempt)
         state = {}
@@ -609,6 +670,8 @@ class TaskRunner:
                 attempt["no_motion"] = True
             else:
                 direction = "+x" if goal > start else "-x"
+                if self._relative_leg is not None and (goal - start) * self._position_error(goal, start) >= 0:
+                    raise TaskError("visual_target_and_model_motion_disagree")
                 self.tool_direction = direction
                 def free(stage_attempt):
                     self._free_entry(color, direction, state, stage_attempt)
@@ -618,6 +681,7 @@ class TaskRunner:
                 state = self._push_with_corrections(color, goal, direction, state, attempt)
                 self._withdraw(state, attempt)
             attempt["status"] = record["status"] = "completed"
+            record.update(self._relative_details(state["sliders_x_mm"][color]))
             return record, state
         except KeyboardInterrupt:
             attempt.update(status="interrupted", stop=self.motors.halt())
@@ -635,6 +699,10 @@ class TaskRunner:
         """
         required, max_spread = 3, 1.0
         limit = max(required, int(self.config["retry_limit"]) + 1)
+        if self.relative_measurement:
+            required = int(self.config["verification"]["samples"])
+            max_spread = self.verification_max_spread
+            limit = required + self.unreliable_extra_samples
         confirmation = result["initial_limits_confirmation"] = {
             "status": "unconfirmed", "required_samples": required,
             "max_spread_mm": max_spread, "max_observations": limit, "observations": []}
@@ -673,6 +741,11 @@ class TaskRunner:
                                                                    "max_spread_mm": max_spread})
                 if len(accepted) >= required:
                     confirmation.update(status="confirmed", spread_mm=spread)
+                    if self.relative_measurement:
+                        observed = copy.deepcopy(observed)
+                        observed["sliders_x_mm"] = {
+                            c: statistics.median(s["sliders_x_mm"][c] for s in accepted)
+                            for c in self.config["sliders"]}
                     return observed
                 print("[vision] initial confirmation %d/%d" % (len(accepted), required), flush=True)
             except Exception as exc:
@@ -690,6 +763,7 @@ class TaskRunner:
     def run(self, task):
         task = normalize_task(task)
         self.observation_home = None
+        self._relative_leg = None
         result = {"mode": "hardware_execution", "status": "failed", "task": task,
                   "segments": [], "completed_round_trips": 0,
                   "planned_round_trips": task.get("round_trips", 0)}
@@ -706,7 +780,10 @@ class TaskRunner:
             goals, extra = self.legs(task, initial["sliders_x_mm"], initial.get("slider_limits_x_mm"))
             result.update(extra)
             result["slider_limits_x_mm"] = {c: list(self.targets.bounds(c)) for c in self.config["sliders"]}
+            references = (self._relative_references(task, goals, initial["sliders_x_mm"][task["color"]])
+                          if self.relative_measurement else [None] * len(goals))
             for index, goal in enumerate(goals):
+                self._relative_leg = references[index]
                 leg, state = self._run_leg(task["color"], goal)
                 result["segments"].append(leg)
                 if leg["status"] != "completed":

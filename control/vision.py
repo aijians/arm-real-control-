@@ -2,20 +2,27 @@
 import json
 import math
 from pathlib import Path
+import statistics
 import time
 
 try:
-    from vision_tools.detect_sliders import detect_sliders, detect_frame
+    from vision_tools.detect_sliders import SCENES, _needs_180_rotation, _read_image, detect_sliders, detect_frame
     from .camera import CameraSession, CameraError
     from vision_tools.pixel_to_world import convert_detections, DEFAULT_CALIBRATION
+    from vision_tools.rail_registration import RailRegistration, RailRegistrationError
 except ImportError:
-    from detect_sliders import detect_sliders, detect_frame
+    from detect_sliders import SCENES, _needs_180_rotation, _read_image, detect_sliders, detect_frame
     from camera import CameraSession, CameraError
     from pixel_to_world import convert_detections, DEFAULT_CALIBRATION
+    from rail_registration import RailRegistration, RailRegistrationError
 
 
 class VisionError(RuntimeError):
     pass
+
+
+class VisionFrameRejected(VisionError):
+    """A fresh image failed measurement and may be replaced by a new frame."""
 
 
 # 肩轴坐标系模型固定行程（mm）：蓝左止挡 −46.56、橙右止挡 13.44（CAD），
@@ -134,6 +141,76 @@ class Vision:
                 f"vision_model_rail_y_mismatch: plane_y({cal_plane_y}) - shoulder_y({self.shoulder[1]}) "
                 f"!= rail_model_y_mm({self.rail_y})"
             )
+        self.registration = None
+        self.relative_measurement = config.get("relative_measurement") is not None
+        self.stop_references = {}
+        if self.relative_measurement:
+            settings = config["relative_measurement"]
+            if (not isinstance(settings, dict) or self.calibration is None
+                    or cal.get("pixel_coordinate_frame") != "scene_upright"):
+                raise VisionError("relative measurement requires explicit upright camera calibration")
+            self.radius = _finite(settings.get("stem_radius_mm"), "stem_radius_mm")
+            if self.radius <= 0:
+                raise VisionError("stem_radius_mm must be positive")
+            reference = settings.get("reference_image")
+            if not isinstance(reference, str) or not reference:
+                raise VisionError("relative measurement requires an upright reference_image")
+            try:
+                reference_frame = _read_image(self.root / reference)
+                self.registration = RailRegistration(reference_frame, settings.get("registration_rois"))
+            except (ValueError, OSError) as exc:
+                raise VisionError("invalid_rail_registration_reference: " + str(exc)) from exc
+            if self.registration.size != tuple(cal["image_size_px"]):
+                raise VisionError("registration reference and camera calibration sizes differ")
+            profile = self.config.get("profile", self.config.get("scene", "real"))
+            self.reference_rail = self._reference_rail_line(
+                reference_frame, profile, settings.get("reference_rail_uv"))
+            self.stop_reference_frames = settings.get("stop_reference_frames", {})
+            if not isinstance(self.stop_reference_frames, dict):
+                raise VisionError("stop_reference_frames must be a mapping")
+
+    def _reference_rail_line(self, image, profile, points):
+        if points is None:
+            line = detect_frame(image, profile=profile, already_rotated=True)["rail_line"]
+            if line["source"] != "fitted":
+                raise VisionError("reference rail line not observed; set reference_rail_uv on the white lower edge")
+            return line["k"], line["m"]
+        if not isinstance(points, list) or len(points) != 2 or any(
+                not isinstance(p, list) or len(p) != 2 for p in points):
+            raise VisionError("reference_rail_uv must contain two upright frame points")
+        (u1, v1), (u2, v2) = [tuple(_finite(x, "reference_rail_uv") for x in p) for p in points]
+        width, height = self.registration.size
+        if not (0 <= u1 < u2 < width and 0 <= v1 < height and 0 <= v2 < height and u2 - u1 >= 60):
+            raise VisionError("reference_rail_uv must span at least 60 pixels within the reference frame")
+        canonical_w, canonical_h = SCENES[profile]["canonical_size"]
+        x1, x2 = ((u + 0.5) * canonical_w / width - 0.5 for u in (u1, u2))
+        y1, y2 = ((v + 0.5) * canonical_h / height - 0.5 for v in (v1, v2))
+        k = (y2 - y1) / (x2 - x1)
+        return k, y1 - k * x1
+
+    def stop_reference_x(self, color, side, max_spread_mm):
+        key = color, side, max_spread_mm
+        if key not in self.stop_references:
+            endpoints = self.stop_reference_frames.get(color, {})
+            files = endpoints.get(side) if isinstance(endpoints, dict) else None
+            if (not isinstance(files, list) or not 5 <= len(files) <= 10
+                    or any(not isinstance(f, str) or not f for f in files)
+                    or len({(self.root / f).resolve() for f in files}) != len(files)):
+                raise VisionError(f"stop_reference_requires_5_to_10_distinct_frames:{color}:{side}")
+            positions = []
+            for name in files:
+                path = self.root / name
+                try:
+                    observation = self._detect(_read_image(path), detect_frame, "stop_reference", upright=True)
+                except (ValueError, OSError) as exc:
+                    raise VisionError("stop_reference_frame_invalid:" + str(path)) from exc
+                if not observation["reliability"][color]["measurement_reliable"]:
+                    raise VisionError("stop_reference_frame_unreliable:" + str(path))
+                positions.append(observation["sliders_x_mm"][color])
+            if max(positions) - min(positions) > max_spread_mm:
+                raise VisionError(f"stop_reference_position_unstable:{color}:{side}")
+            self.stop_references[key] = float(statistics.median(positions))
+        return self.stop_references[key]
 
     def _world_to_model(self, xyz):
         if not isinstance(xyz, (list, tuple)) or len(xyz) != 3:
@@ -233,15 +310,31 @@ class Vision:
             "橙": [orange_lo, orange_hi],
         }
 
-    def _detect(self, image, detector, source):
-        del source
+    def _detect(self, image, detector, source, *, upright=False):
         profile = self.config.get("profile", self.config.get("scene", "real"))
         already_rotated = bool(self.config.get("already_rotated", False))
+        registration = None
         try:
-            pixels = detector(image, profile=profile, already_rotated=already_rotated)
+            if self.registration is None:
+                pixels = detector(image, profile=profile, already_rotated=already_rotated)
+            else:
+                if source == "offline_image":
+                    image = _read_image(image)
+                cfg = SCENES[profile]
+                if not upright and not already_rotated and (cfg["rotation_deg"] == 180
+                        or _needs_180_rotation(image, cfg["roi"], False)):
+                    image = image[::-1, ::-1].copy()
+                image, registration = self.registration.align(image)
+                pixels = detect_frame(image, profile=profile, already_rotated=True, use_tangent=True,
+                                      reference_rail=self.reference_rail)
             world = convert_detections(pixels, calibration=self.calibration,
-                                       rail_z_mm=self.config.get("rail_z_mm"))
+                                       rail_z_mm=self.config.get("rail_z_mm"),
+                                       **({"stem_radius_mm": self.radius} if registration else {}))
+        except RailRegistrationError as exc:
+            raise VisionFrameRejected(str(exc)) from exc
         except Exception as exc:
+            if self.relative_measurement:
+                raise VisionFrameRejected("slider_detection_failed: " + str(exc)) from exc
             raise VisionError("slider_detection_failed: " + str(exc)) from exc
         if (world.get("units") != "mm"
                 or world.get("coordinate_frame") != self.world_frame
@@ -253,9 +346,9 @@ class Vision:
         for external, color in (("yellow", "橙"), ("blue", "蓝")):
             item = converted.get(external)
             if not isinstance(item, dict):
-                raise VisionError("slider_missing: " + color)
+                raise (VisionFrameRejected if self.relative_measurement else VisionError)("slider_missing: " + color)
             if item.get("approximate") is True:
-                raise VisionError("shaft_axis_not_observed: " + color)
+                raise (VisionFrameRejected if self.relative_measurement else VisionError)("shaft_axis_not_observed: " + color)
             xyz = item.get("world_xyz_mm")
             if not isinstance(xyz, (list, tuple)) or len(xyz) != 3:
                 raise VisionError("invalid_world_xyz_mm: " + color)
@@ -267,7 +360,8 @@ class Vision:
             positions[color] = model_x
 
         if positions["蓝"] >= positions["橙"]:
-            raise VisionError("slider_order_invalid: 蓝 must be left of 橙")
+            raise (VisionFrameRejected if self.relative_measurement else VisionError)(
+                "slider_order_invalid: 蓝 must be left of 橙")
 
         # 导轨端点与由其推出的行程只作诊断记录，不参与通过/拒绝；行程采用模型固定值。
         rail_observation = {"endpoints_px": pixels.get("rail_endpoints_px"),
@@ -280,17 +374,19 @@ class Vision:
         diagnostic = {}
         self._compute_slider_limits(world, positions, diagnostic)
         rail_observation["endpoint_diagnostic"] = diagnostic
+        if registration is not None:
+            rail_observation["registration"] = registration
 
         return {
             "sliders_x_mm": positions,
             "slider_limits_x_mm": {c: list(v) for c, v in self.fixed_limits.items()},
-            "reliability": self._reliability(pixels, positions),
+            "reliability": self._reliability(pixels, positions, converted if registration else None),
             "rail_observation": rail_observation,
             "stamp_monotonic_s": None,
             "approximate": bool(world.get("is_approximate", True)),
         }
 
-    def _reliability(self, pixels, positions):
+    def _reliability(self, pixels, positions, converted=None):
         """合并识别层可靠性（杆宽一致、测量行数、遮挡补偿）与物理止挡检查。"""
         result = {}
         detected = pixels.get("sliders") or {}
@@ -299,6 +395,12 @@ class Vision:
             item = detected.get(external) or (detected.get("orange") if external == "yellow" else None) or {}
             reasons = list(item.get("reasons", []))
             reliable = bool(item.get("reliable", True))
+            world_item = converted[external] if converted else {}
+            core_spread = world_item.get("axis_x_core_spread_mm")
+            if core_spread is not None and core_spread > 1.0:
+                reliable = False
+                reasons.append("cylinder_tangent_rows_disagree")
+            measurement_reliable = reliable
             lo, hi = self.fixed_limits[color]
             x = positions[color]
             beyond = max(lo - x, x - hi, 0.)
@@ -315,6 +417,9 @@ class Vision:
                 "rows_used": measurement.get("rows_used"),
                 "beyond_fixed_limits_mm": beyond,
             }
+            if converted:
+                result[color].update(occluded=bool(world_item.get("occluded")),
+                    measurement_reliable=measurement_reliable, tangent_core_spread_mm=core_spread)
         return result
 
     def read(self, after_monotonic_s=None):

@@ -364,7 +364,66 @@ def pixel_to_world(pixel_xy, image_size_px=(1920, 1080), calibration=None,
     return result
 
 
-def convert_detections(payload, calibration=None, rail_z_mm=None):
+def _tangent_axis(edge_pixels, visible_side, size, config, radius, rail_z_mm):
+    """Recover a vertical cylinder axis from its visible silhouette.
+
+    In XY, the pixel ray is tangent to the radius-R circle centered on
+    Y=plane_y_mm. Solve the signed distance from the center to that ray.
+    An adjacent pixel toward the silhouette interior resolves the two roots
+    independently of camera orientation and world handedness.
+    """
+    pixels = np.asarray(edge_pixels, dtype=float)
+    side = {"left": 1., "right": -1.}.get(visible_side)
+    if (side is None or pixels.ndim != 2 or pixels.shape[1] != 2
+            or not 8 <= len(pixels) <= 250 or not np.all(np.isfinite(pixels))):
+        raise ValueError("invalid cylinder silhouette measurements")
+    inward = pixels + [side, 0.]
+    samples = np.vstack((pixels, inward))
+    if np.any(samples < 0.) or np.any(samples >= np.asarray(size)):
+        raise ValueError("cylinder silhouette outside the image")
+    intrinsic = _scaled_intrinsics(config, size)
+    distorted = np.column_stack((samples, np.ones(len(samples)))) @ np.linalg.inv(intrinsic).T
+    normalized = distorted[:, :2]
+    if not config["pixels_are_undistorted"] and np.any(config["D"]):
+        import cv2
+        normalized = cv2.undistortPointsIter(normalized.reshape(-1, 1, 2), np.eye(3),
+            np.asarray(config["D"]), None, None,
+            (cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, 100, 1e-12)).reshape(-1, 2)
+    world_rays = np.column_stack((normalized, np.ones(len(samples)))) @ np.asarray(
+        config["R_world_from_camera"]).T
+    centre = np.asarray(config["C_world_mm"])
+    plane_y = config["plane_y_mm"]
+    if not np.all(np.isfinite(world_rays)) or np.any(np.abs(world_rays[:, 1]) < 1e-8):
+        raise ValueError("cylinder tangent ray cannot intersect the rail plane")
+    t = (plane_y - centre[1]) / world_rays[:, 1]
+    if np.any(t <= 0):
+        raise ValueError("cylinder tangent rail plane is behind the camera")
+    intersections = centre + t[:, None] * world_rays
+    edge, inner = np.split(intersections, 2)
+    sign = np.sign(inner[:, 0] - edge[:, 0])
+    if not np.all(sign == sign[0]) or sign[0] == 0:
+        raise ValueError("cylinder tangent direction is ambiguous")
+    rays = world_rays[:len(pixels)]
+    x = edge[:, 0] + sign * radius * np.hypot(rays[:, 0], rays[:, 1]) / np.abs(rays[:, 1])
+    trim = len(x) // 4
+    core = np.sort(x)[trim:len(x)-trim]
+    return {
+        "pixel_xy": None,
+        "world_xyz_mm": [float(core.mean()), plane_y,
+                         float(np.median(edge[:, 2]) if rail_z_mm is None else rail_z_mm)],
+        "position_definition": ("shaft_axis_reference_point" if rail_z_mm is None
+                                else "vertical_shaft_axis_at_known_rail_height"),
+        "method": "vertical_cylinder_tangent_intersection_with_known_y",
+        "units": "mm",
+        "coordinate_frame": config["world_coordinate_frame"],
+        "world_handedness": config["world_handedness"],
+        "is_approximate": config["is_approximate"],
+        "occluded": True,
+        "axis_x_core_spread_mm": float(core[-1] - core[0]),
+    }
+
+
+def convert_detections(payload, calibration=None, rail_z_mm=None, *, stem_radius_mm=None):
     """接收 detect_sliders.py 的 JSON 字典；转换滑杆坐标与诊断用导轨端点坐标，并透传可靠性字段。"""
     if not isinstance(payload, dict):
         raise ValueError("检测输入必须是 JSON 对象")
@@ -407,7 +466,16 @@ def convert_detections(payload, calibration=None, rail_z_mm=None):
             continue
         if not isinstance(item, dict) or "pixel_xy" not in item:
             raise ValueError(color + " 检测项必须提供 pixel_xy")
-        point = pixel_to_world(item["pixel_xy"], size, active_config, rail_z_mm)
+        reference_method = item.get("reference_method", "")
+        if reference_method == "rod_band_far_edge_tangent":
+            radius = _finite_number(stem_radius_mm, "stem_radius_mm")
+            if not explicit or radius <= 0:
+                raise ValueError("cylinder tangent requires an explicit calibration and positive radius")
+            measurement = item.get("measurement") or {}
+            point = _tangent_axis(measurement.get("edge_pixels"), measurement.get("visible_side"),
+                                  size, active_config, radius, rail_z_mm)
+        else:
+            point = pixel_to_world(item["pixel_xy"], size, active_config, rail_z_mm)
         for key in (
             "method",
             "reference_method",
@@ -422,7 +490,6 @@ def convert_detections(payload, calibration=None, rail_z_mm=None):
         ):
             if key in item:
                 point[key] = item[key]
-        reference_method = item.get("reference_method", "")
         block_fallback = ("approximate" in str(reference_method)
                           or str(reference_method).startswith("block"))
         if item.get("approximate") is True or block_fallback:
