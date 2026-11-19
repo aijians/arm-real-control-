@@ -221,6 +221,8 @@ class TaskRunner:
             if other_state.get("reliable", True) and drift > self.stationary_drift_mm:
                 reliable = False
                 reasons.append("stationary_slider_drift:%s:%.3f" % (other, drift))
+                if self._relative_leg is not None and other_state.get("occluded"):
+                    reasons.append("stationary_slider_occluded_drift:%s:%.3f" % (other, drift))
             elif not other_state.get("reliable", True):
                 reasons.append("stationary_slider_unreliable:%s" % other)
         return reliable, reasons

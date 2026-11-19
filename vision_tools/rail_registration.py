@@ -51,7 +51,8 @@ class RailRegistration:
         gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY).astype(np.float32)
         return gray - cv2.GaussianBlur(gray, (0, 0), 3.0)
 
-    def align(self, upright):
+    def estimate_shift(self, upright):
+        """Return the reference-to-current offset without resampling the frame."""
         if upright.shape[1::-1] != self.size:
             raise RailRegistrationError("registration image size differs from reference")
         moving = self._texture(upright)
@@ -87,7 +88,11 @@ class RailRegistration:
             scores.append(float(np.clip(np.dot(ref, live) / norm, -1.0, 1.0)) if norm > 0 else 0.0)
         if min(scores) < self.min_correlation:
             raise RailRegistrationError("rail_registration_patch_disagreement")
+        return shift, warp, {"shift_from_reference_px": shift.tolist(),
+                             "ecc": float(score), "roi_correlations": scores}
+
+    def align(self, upright):
+        _, warp, info = self.estimate_shift(upright)
         aligned = cv2.warpAffine(upright, warp, self.size,
                                  flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP)
-        return aligned, {"shift_from_reference_px": shift.tolist(),
-                         "ecc": float(score), "roi_correlations": scores}
+        return aligned, info

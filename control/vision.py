@@ -42,6 +42,25 @@ def _finite(value, name):
     return number
 
 
+def _compensate_pixels_shift(pixels, dx, dy, reference_rail):
+    """Map the detector's current-frame points to the upright calibration frame."""
+    for item in pixels["sliders"].values():
+        if item is None:
+            continue
+        if item["pixel_xy"] is not None:
+            u, v = item["pixel_xy"]
+            item["pixel_xy"] = [u - dx, v - dy]
+        measurement = item["measurement"]
+        if "edge_pixels" in measurement:
+            measurement["edge_pixels"] = [
+                [u - dx, v - dy] for u, v in measurement["edge_pixels"]]
+    endpoints = pixels["rail_endpoints_px"]
+    if endpoints is not None:
+        pixels["rail_endpoints_px"] = [[u - dx, v - dy] for u, v in endpoints]
+    k, m = reference_rail
+    pixels["rail_line"].update(k=round(k, 6), m=round(m, 3))
+
+
 class Vision:
     """A task owns one video stream. Detection reads its latest new frame.
 
@@ -324,9 +343,18 @@ class Vision:
                 if not upright and not already_rotated and (cfg["rotation_deg"] == 180
                         or _needs_180_rotation(image, cfg["roi"], False)):
                     image = image[::-1, ::-1].copy()
-                image, registration = self.registration.align(image)
+                shift, _, registration = self.registration.estimate_shift(image)
+                dx, dy = map(float, shift)
+                width, height = self.registration.size
+                canonical_width, canonical_height = cfg["canonical_size"]
+                k, m = self.reference_rail
+                # Shift the measurement band into the live frame. Keep its
+                # native edges and translate only the points used by scheme E.
+                shifted_rail = (k, m + dy * canonical_height / height
+                                  - k * dx * canonical_width / width)
                 pixels = detect_frame(image, profile=profile, already_rotated=True, use_tangent=True,
-                                      reference_rail=self.reference_rail)
+                                      reference_rail=shifted_rail)
+                _compensate_pixels_shift(pixels, dx, dy, self.reference_rail)
             world = convert_detections(pixels, calibration=self.calibration,
                                        rail_z_mm=self.config.get("rail_z_mm"),
                                        **({"stem_radius_mm": self.radius} if registration else {}))
@@ -437,7 +465,8 @@ class Vision:
         result = self._detect(frame["image"], detect_frame, "latest_video_frame")
         received = frame["received_monotonic_s"]
         if time.monotonic() - received > self.max_age:
-            raise VisionError("camera_frame_stale_after_detection")
+            error = VisionFrameRejected if self.relative_measurement else VisionError
+            raise error("camera_frame_stale_after_detection")
         result["rail_observation"].update(frame_sequence=frame["sequence"],
             received_monotonic_s=received, pipeline_pts_ns=frame.get("pipeline_pts_ns"))
         result.update(stamp_monotonic_s=received)
