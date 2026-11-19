@@ -43,22 +43,34 @@ def _finite(value, name):
 
 
 def _compensate_pixels_shift(pixels, dx, dy, reference_rail):
-    """Map the detector's current-frame points to the upright calibration frame."""
+    """Subtract native-resolution shifts from points in the upright image.
+
+    pixel_xy, edge_pixels and rail_endpoints_px use the input image size
+    (registration.size). rail_line uses canonical_size and is restored from
+    the canonical reference line, not translated by these native offsets.
+    """
+    def reference_point(point):
+        if point is None:
+            return None
+        u, v = point
+        return [u - dx, v - dy]
+
     for item in pixels["sliders"].values():
         if item is None:
             continue
-        if item["pixel_xy"] is not None:
-            u, v = item["pixel_xy"]
-            item["pixel_xy"] = [u - dx, v - dy]
-        measurement = item["measurement"]
-        if "edge_pixels" in measurement:
+        if item.get("pixel_xy") is not None:
+            item["pixel_xy"] = reference_point(item["pixel_xy"])
+        measurement = item.get("measurement")
+        if measurement is not None and measurement.get("edge_pixels") is not None:
             measurement["edge_pixels"] = [
-                [u - dx, v - dy] for u, v in measurement["edge_pixels"]]
-    endpoints = pixels["rail_endpoints_px"]
+                reference_point(point) for point in measurement["edge_pixels"]]
+    endpoints = pixels.get("rail_endpoints_px")
     if endpoints is not None:
-        pixels["rail_endpoints_px"] = [[u - dx, v - dy] for u, v in endpoints]
-    k, m = reference_rail
-    pixels["rail_line"].update(k=round(k, 6), m=round(m, 3))
+        pixels["rail_endpoints_px"] = [reference_point(point) for point in endpoints]
+    rail_line = pixels.get("rail_line")
+    if rail_line is not None:
+        k, m = reference_rail
+        rail_line.update(k=round(k, 6), m=round(m, 3))
 
 
 class Vision:
@@ -266,7 +278,8 @@ class Vision:
 
     def detect_image(self, path):
         """Saved-image analysis grants no live-observation freshness."""
-        return self._detect(path, detect_sliders, "offline_image")
+        detector = detect_frame if self.registration is not None else detect_sliders
+        return self._detect(path, detector, "offline_image")
 
     def _compute_slider_limits(self, world, positions, report=None):
         """由实测导轨左右端点计算按颜色区分的动态行程，并校验导轨总跨度及与两个滑杆当前位置的一致性。
@@ -347,13 +360,9 @@ class Vision:
                 dx, dy = map(float, shift)
                 width, height = self.registration.size
                 canonical_width, canonical_height = cfg["canonical_size"]
-                k, m = self.reference_rail
-                # Shift the measurement band into the live frame. Keep its
-                # native edges and translate only the points used by scheme E.
-                shifted_rail = (k, m + dy * canonical_height / height
-                                  - k * dx * canonical_width / width)
-                pixels = detect_frame(image, profile=profile, already_rotated=True, use_tangent=True,
-                                      reference_rail=shifted_rail)
+                canonical_shift = dx * canonical_width / width, dy * canonical_height / height
+                pixels = detector(image, profile=profile, already_rotated=True, use_tangent=True,
+                                  reference_rail=self.reference_rail, reference_shift=canonical_shift)
                 _compensate_pixels_shift(pixels, dx, dy, self.reference_rail)
             world = convert_detections(pixels, calibration=self.calibration,
                                        rail_z_mm=self.config.get("rail_z_mm"),
@@ -450,6 +459,15 @@ class Vision:
                     measurement_reliable=measurement_reliable, tangent_core_spread_mm=core_spread)
         return result
 
+    def _check_detection_age(self, received, detection_started):
+        finished = time.monotonic()
+        if finished - received > self.max_age:
+            print("[vision] camera_frame_stale_after_detection: sequence=%s age=%.3fs "
+                  "detection=%.3fs max_age=%.3fs" %
+                  (self.last_sequence, finished - received, finished - detection_started, self.max_age),
+                  flush=True)
+            raise VisionError("camera_frame_stale_after_detection")
+
     def read(self, after_monotonic_s=None):
         started = time.monotonic()
         after = None if after_monotonic_s is None else _finite(after_monotonic_s, "after_monotonic_s")
@@ -462,11 +480,14 @@ class Vision:
         except CameraError as exc:
             raise VisionError(str(exc)) from exc
         self.last_sequence = frame["sequence"]
-        result = self._detect(frame["image"], detect_frame, "latest_video_frame")
         received = frame["received_monotonic_s"]
-        if time.monotonic() - received > self.max_age:
-            error = VisionFrameRejected if self.relative_measurement else VisionError
-            raise error("camera_frame_stale_after_detection")
+        detection_started = time.monotonic()
+        try:
+            result = self._detect(frame["image"], detect_frame, "latest_video_frame")
+        except VisionFrameRejected:
+            self._check_detection_age(received, detection_started)
+            raise
+        self._check_detection_age(received, detection_started)
         result["rail_observation"].update(frame_sequence=frame["sequence"],
             received_monotonic_s=received, pipeline_pts_ns=frame.get("pipeline_pts_ns"))
         result.update(stamp_monotonic_s=received)

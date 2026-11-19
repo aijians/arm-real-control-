@@ -3,13 +3,14 @@
 import json
 from pathlib import Path
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import cv2
 import numpy as np
 
 from control.tasks import TaskRunner
-from control.vision import VisionFrameRejected
+from control.vision import Vision, VisionError, VisionFrameRejected
+from vision_tools.detect_sliders import _refine_orange_mask_edge, _shift_roi, detect_frame
 from vision_tools.pixel_to_world import convert_detections
 from vision_tools.rail_registration import RailRegistration, RailRegistrationError
 
@@ -61,11 +62,86 @@ class TestRegistration(unittest.TestCase):
         shift = (2.25, -3.125)
         moved = cv2.warpAffine(reference, np.float32([[1, 0, shift[0]], [0, 1, shift[1]]]),
                                (410, 260), flags=cv2.INTER_CUBIC)
+        measured, warp, _ = tracker.estimate_shift(moved)
+        measured[:] = 0.
+        np.testing.assert_allclose(warp[:, 2], shift, atol=.13)
         _, result = tracker.align(moved)
         np.testing.assert_allclose(result["shift_from_reference_px"], shift, atol=.13)
         moved[29:114, 22:121] = 128
         with self.assertRaises(RailRegistrationError):
             tracker.align(moved)
+
+    def test_registered_crop_keeps_rod_past_fixed_right_edge(self):
+        image = np.full((1080, 1920, 3), 35, np.uint8)
+        image[150:248, 668:692] = (30, 140, 240)
+        moved = cv2.warpAffine(image, np.float32([[1, 0, 10], [0, 1, -4]]), (1920, 1080))
+        with patch("vision_tools.detect_sliders._detect_rail_endpoints", return_value=None) as endpoints:
+            result = detect_frame(moved, profile="real", already_rotated=True,
+                                  reference_rail=(.7, -210.), reference_shift=(10, -4))
+        orange = result["sliders"]["yellow"]
+        self.assertTrue(orange["reliable"], orange["reasons"])
+        self.assertGreater(orange["measurement"]["rows_used"], 20)
+        self.assertAlmostEqual(orange["pixel_xy"][0], 689.5)
+        self.assertNotIn("rod_touches_roi_boundary", orange["reasons"])
+        self.assertEqual(endpoints.call_args.args[-1]["roi"], (430, 76, 710, 361))
+        self.assertEqual(_shift_roi((2, 10, 20, 24), -3.2, 2.8, 25, 26), (0, 13, 17, 26))
+
+    def test_orange_edge_uses_first_crossing_and_keeps_morphological_boundary(self):
+        low = np.array([[10, 50, 10]])
+        high = np.array([[40, 30, 50]])
+        tests = ((low, 20, 1), (high, 35, -1))
+        self.assertAlmostEqual(_refine_orange_mask_edge(tests, 1, 0, -1), 0.5)
+        self.assertAlmostEqual(_refine_orange_mask_edge(tests, 1, 0, 1), 1.25)
+        self.assertAlmostEqual(_refine_orange_mask_edge(tests, 0, 0, 1), 0.5)
+
+
+class TestRegisteredVision(unittest.TestCase):
+    def vision(self):
+        vision = Vision(ROOT, json.loads((ROOT / "config/robot.json").read_text())["vision"])
+        vision.relative_measurement = True
+        return vision
+
+    def test_injected_detector_gets_canonical_shift_and_native_points_keep_missing_end(self):
+        vision = self.vision()
+        vision.registration = Mock(size=(960, 540))
+        vision.registration.estimate_shift.return_value = ((2., -3.), None, {"ecc": 1.})
+        vision.reference_rail = (.6, -70.)
+        vision.radius = 4.
+        image = np.zeros((540, 960, 3), np.uint8)
+        detector = Mock(return_value={
+            "rail_line": None, "rail_endpoints_px": [[320., 135.], None],
+            "sliders": {"blue": {"pixel_xy": [250., 113.], "measurement": None},
+                        "yellow": {"pixel_xy": None, "measurement": {"edge_pixels": [[331., 111.]]}}}})
+        result = {"units": "mm", "coordinate_frame": vision.world_frame,
+                  "position_definition": "shaft_axis_reference_point",
+                  "sliders": {"blue": {"world_xyz_mm": [105., 181.5, 0.]},
+                              "yellow": {"world_xyz_mm": [54., 181.5, 0.], "occluded": True}}}
+        with patch("control.vision.convert_detections", return_value=result) as convert:
+            observation = vision._detect(image, detector, "test", upright=True)
+        detector.assert_called_once_with(image, profile="real", already_rotated=True,
+            use_tangent=True, reference_rail=(.6, -70.), reference_shift=(4., -6.))
+        payload = convert.call_args.args[0]
+        self.assertEqual(payload["sliders"]["blue"]["pixel_xy"], [248., 116.])
+        self.assertEqual(payload["sliders"]["yellow"]["measurement"]["edge_pixels"], [[329., 114.]])
+        self.assertEqual(observation["rail_observation"]["endpoints_px"], [[318., 138.], None])
+        self.assertIsNone(observation["rail_observation"]["rail_line"])
+        self.assertIs(observation["reliability"]["橙"]["occluded"], True)
+        self.assertIs(observation["reliability"]["蓝"]["occluded"], False)
+
+    def test_stale_frame_is_consumed_and_logs_latency_as_hard_error(self):
+        vision = self.vision()
+        vision.max_age = 1.
+        vision.camera = Mock()
+        vision.camera.frame.return_value = {"image": None, "sequence": 23, "received_monotonic_s": 4.}
+        for optical_reject in (None, VisionFrameRejected("rail_registration_patch_disagreement")):
+            with self.subTest(optical_reject=optical_reject):
+                vision._detect = Mock(return_value={}, side_effect=optical_reject)
+                with patch("control.vision.time.monotonic", side_effect=[4.0, 4.1, 5.5]), patch("builtins.print") as log:
+                    with self.assertRaisesRegex(VisionError, "^camera_frame_stale_after_detection$") as exc:
+                        vision.read()
+                self.assertNotIsInstance(exc.exception, VisionFrameRejected)
+                self.assertEqual(vision.last_sequence, 23)
+                self.assertIn("age=1.500s detection=1.400s max_age=1.000s", log.call_args.args[0])
 
 
 class TestRelativeVerification(unittest.TestCase):
@@ -112,6 +188,38 @@ class TestRelativeVerification(unittest.TestCase):
         self.assertFalse(result["passed"])
         self.assertFalse(result["forced"])
         self.assertEqual(result["reliable_samples"], 3)
+
+    def test_staleness_aborts_verification_without_consuming_more_reads_or_retries(self):
+        runner, vision = self.runner()
+        runner._relative_leg = runner._relative_references(
+            {"intent": "push_distance", "color": "蓝"}, [-20.], -35.)[0]
+        runner.motors = Mock()
+        runner.motors.halt.return_value = {"stopped_confirmed": True}
+        record = {}
+        vision.read.side_effect = VisionError("camera_frame_stale_after_detection")
+        with self.assertRaisesRegex(VisionError, "^camera_frame_stale_after_detection$"):
+            runner._stage("verification", {}, record, lambda _: runner._verify("蓝", -20., 0.))
+        vision.read.assert_called_once()
+        self.assertEqual(len(record["stage_attempts"]["verification"]), 1)
+
+    def test_non_target_drift_uses_reliable_occluded_readings_and_logs_both_reasons(self):
+        runner, vision = self.runner()
+        runner.reference_positions = {"橙": 1.0}
+        runner.stationary_drift_mm = 0.5
+        runner._relative_leg = runner._relative_references(
+            {"intent": "push_distance", "color": "蓝"}, [-20.], -35.)[0]
+        state = {"sliders_x_mm": {"蓝": -20., "橙": 3.},
+                 "stamp_monotonic_s": 1.,
+                 "reliability": {"橙": {"reliable": True, "occluded": True}}}
+        vision.read.return_value = state
+        rejected = runner._verify("蓝", -20., 0.)
+        self.assertEqual(rejected["unreliable_reasons"], [
+            "stationary_slider_drift:橙:2.000", "stationary_slider_occluded_drift:橙:2.000"])
+        self.assertFalse(rejected["passed"])
+        state["reliability"]["橙"]["reliable"] = False
+        accepted = runner._verify("蓝", -20., 0.)
+        self.assertTrue(accepted["passed"])
+        self.assertEqual(accepted["samples"][0]["reasons"], ["stationary_slider_unreliable:橙"])
 
     def test_stop_reference_is_checked_before_motion(self):
         runner, vision = self.runner()

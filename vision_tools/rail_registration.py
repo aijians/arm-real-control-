@@ -88,7 +88,7 @@ class RailRegistration:
             scores.append(float(np.clip(np.dot(ref, live) / norm, -1.0, 1.0)) if norm > 0 else 0.0)
         if min(scores) < self.min_correlation:
             raise RailRegistrationError("rail_registration_patch_disagreement")
-        return shift, warp, {"shift_from_reference_px": shift.tolist(),
+        return shift.copy(), warp, {"shift_from_reference_px": shift.tolist(),
                              "ecc": float(score), "roi_correlations": scores}
 
     def align(self, upright):

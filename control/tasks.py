@@ -25,7 +25,7 @@ class TaskRunner:
     _relative_leg = None
     _NO_RETRY = {"motion_halted", "stop_not_confirmed", "joint_feedback_out_of_limits",
                  "motion_goal_hold_hard_limit", "slider_overshot_target", "motion_already_running",
-                 "verification_unreliable"}
+                 "verification_unreliable", "camera_frame_stale_after_detection"}
     # 运动到位判定失败但机械臂已停在目标附近的错误；端点任务中可由模型推头到位窗口吸收。
     _ARRIVAL_ABSORBABLE = {"motion_goal_settle_timeout", "motion_goal_hold_timeout",
                            "motion_goal_hold_unstable", "motion_no_progress",
@@ -202,7 +202,7 @@ class TaskRunner:
         return sign * self._position_error(goal, actual)
 
     def _sample_reliability(self, state, color):
-        """单帧可靠性：目标杆识别可靠，且另一根（本任务不推）杆相对初始读数未漂移。"""
+        """可靠的非目标杆读数参与漂移检查，不可靠的读数只记诊断。"""
         reliability = state.get("reliability") or {}
         own = reliability.get(color, {})
         reliable = bool(own.get("reliable", True))
