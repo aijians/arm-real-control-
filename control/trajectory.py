@@ -4,6 +4,46 @@ from collections import deque
 import math
 
 
+PHYSICAL_TIMING = {"joint_trapezoid", "cartesian_constant_speed"}
+
+
+def trapezoidal_joint_points(path, speed_deg_s, accel_deg_s2, period_s, stops):
+    """Follow the joint polyline, coming to rest at each configured corner."""
+    speed, accel = math.radians(speed_deg_s), math.radians(accel_deg_s2)
+    points = [(0., list(path[0]))]
+    start = 0
+    for stop in stops:
+        lengths, vertices = [0.], [path[start]]
+        for a, b in zip(path[start:stop], path[start+1:stop+1]):
+            span = max(abs(y-x) for x, y in zip(a, b))
+            if span > 1e-12:
+                lengths.append(lengths[-1]+span)
+                vertices.append(b)
+        start = stop
+        length = lengths[-1]
+        if length == 0.:
+            continue
+        peak = min(speed, math.sqrt(accel*length))
+        ramp = peak/accel
+        ideal_duration = length/peak + ramp
+        count = math.ceil(ideal_duration/period_s-1e-12)
+        begins_at = points[-1][0]
+        for i in range(1, count):
+            t = ideal_duration*i/count
+            if t <= ramp:
+                travelled = .5*accel*t*t
+            elif t >= ideal_duration-ramp:
+                travelled = length-.5*accel*(ideal_duration-t)**2
+            else:
+                travelled = peak*(t-.5*ramp)
+            j = bisect.bisect_right(lengths, travelled)
+            f = (travelled-lengths[j-1])/(lengths[j]-lengths[j-1])
+            q = [a+(b-a)*f for a, b in zip(vertices[j-1], vertices[j])]
+            points.append((begins_at+i*period_s, q))
+        points.append((begins_at+count*period_s, list(path[stop])))
+    return points
+
+
 def timed_free_points(points, max_step_deg, period_s):
     """Subdivide the joint polyline and give every successor one fixed period.
 

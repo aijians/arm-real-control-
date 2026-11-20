@@ -53,11 +53,18 @@ class DeepContactTests(unittest.TestCase):
         with self.assertRaisesRegex(PlanError, 'insufficient_finite_face_stem_coverage'):
             p.push(pre, '橙', -31.06, POSITIONS, LIMITS['橙'])
 
-    def test_uncertified_decimation_cannot_bypass_final_collision_check(self):
-        def endpoints(name, points, *args):
-            return [points[0], points[-1]], [0, len(points)-1]
-        with patch.object(self.p, '_command_points', side_effect=endpoints):
-            with self.assertRaisesRegex(PlanError, 'collision:'):
+    def test_unsafe_timed_chord_cannot_bypass_final_collision_check(self):
+        original = self.p._line
+
+        def bad_resample(start, target, direction, **options):
+            if options.get('count') == 1:
+                # Inject a bad timed chord after the dense Cartesian path
+                # passes, bypassing the independent IK branch check.
+                return [start, options['q_goal']], [0.]
+            return original(start, target, direction, **options)
+
+        with patch.object(self.p, 'timed_period', 20.), patch.object(self.p, '_line', side_effect=bad_resample):
+            with self.assertRaisesRegex(PlanError, 'timed_cartesian_chord_not_clear'):
                 self.p.push(self.pre, '橙', -31.06, POSITIONS, LIMITS['橙'])
 
     def test_corrected_obstacle_keeps_height_seat_and_plate(self):

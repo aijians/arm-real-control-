@@ -36,25 +36,25 @@ bash run_pid_tuner.sh --axis both --real --pause-sal --host 0.0.0.0 --port 8765
 
 每条写入要求正确电机ID、0x42、参数ID与成功状态应答，超时/拒绝/异常立即中止任务并尝试双轴停止，保留部分写入记录，不自动回写无法确认的旧RAM值。四条全部成功才启动相机和TaskRunner；不保存ROM、不改电流环/输出限制、不使能或改变零点。`result.json.pid_initialization`记录请求值、逐条报文/应答与停止确认。`acknowledged`只表示写入应答，不冒充运行RAM独立读回或已解决全部欠角。现有0x14整组设置不能用于判定这次RAM写入是否生效。
 
-## Free / Push 多圈绝对位置定时基线（2026-11-10）
+## Free / Push 规划与 A4 定时执行（2026-11-20）
 
-当前 `hardware.free_timed_motion.enabled=true`，Free、Push 及 push_correction 共用该配置和执行器。Free 包括自由进场及通过 Planner.free 生成的返回路线；上述阶段均沿原关节折线细分，每轴相邻模型目标最多 `max_step_deg=0.2°`，每个后继点间隔 `period_s=0.05` 秒。保留原路径顶点、拐点及最终目标，重新生成时间；没有额外的 2°/秒路段速度限制。P0 只核对起点，之后每组向两轴各发送一条 A4 多圈绝对位置命令，驱动速度字段：Push（含 push_correction）大臂为 `push_upper_speed_deg_s=60`，小臂及 Free 两轴使用 `speed_deg_s=60`（电机轴 °/s）。
+Free 首先检查关节直线及少量固定关节绕行。左推入口绕行保持实测小臂角，先转大臂，再转小臂，最后接到实时逆解的预接触点。关节候选按最小名义净距选路，净距相同优先关节直线。只有关节候选全部失败时才尝试原笛卡尔配方。关节弦仍按 `collision_step_deg=0.25` 分辨率检查，选中路线与已评估候选的净距保存在计划中。脱离仍走原接触约束的笛卡尔路线。
+
+当 `hardware.free_timed_motion.enabled=true` 时，Free 的梯形时间律使用 `planning.free_trajectory_speed_deg_s=4` 和 `planning.free_trajectory_accel_deg_s2=8`。Push 沿笛卡尔直线以 `planning.push_speed_mm_s=5` 生成等速参考，补推使用自己的 `push_correction.speed_mm_s`。单个周期内能走完的短行程在一个下发周期完成。A4 驱动限速另由 `free_a4_limit_deg_s=18`、`push_a4_limit_deg_s=60` 和 `push_upper_a4_limit_deg_s=60` 设置。旧配置名保留兼容读取，旧格式手工轨迹保留原定步长重采样。
 
 按用户确认的坐标关系，多圈电机角与当前单圈电机角直接对应，例如电机单圈160°即多圈160°。模型角仍使用既有 sign/ratio/offset 换算；不另加圈数偏移。A4 由驱动决定方向，Free / Push 不使用 A6 方向判断、方向余量或 `free_timed_direction_ambiguous` 分支。
 
-中途不等待到位，不按跟踪误差调整目标，不做无进展恢复、偏置、领先量或主从控制。反馈继续按原20Hz查询并记录，用于失联及关节限位检查；A4 回复按状态2解析并记入诊断。每点记录计划时间、实际开始/写完时间及迟到量。迟到节点按序续发，组间至少间隔50毫秒及底层 command_rate_hz 周期，不突发追赶、不跳点；调度超过重新规划的时长加 move_timeout_margin_s 则失败。
+用各轴新角度反馈与对应时刻已发目标比较，并在下发前核对下一目标与最新反馈的偏差。任一轴超过 `hardware.free_timed_motion.tracking_abort_deg=2` 时，立即中断并停止两轴，记录 `timed_tracking_error`，任务不自动重试。诊断记录轴、实测角、参考角、偏差及时间。迟到节点保持计划间隔，按原顺序下发。
 
 全部点发送完后才验收终点：两轴误差≤0.3°、速度≤1°/秒，稳定0.3秒后保持1秒；角度在容差内且相对上一合格反馈变化小于0.05°时，单次速度跳变不重置计时，恢复正常后沿用原计时；同轴连续不同超速样本或角度越界仍重置，硬限异常仍失败；保留5秒整定预算。各阶段失败后先停止并确认停稳，再按最新视觉和实测关节重新规划；每阶段首次执行后最多重试3次（共4次），互不占用次数。停止未确认、主动停止、硬限异常或滑杆超调直接终止。`motion_diagnostics.execution` 记录对应阶段的 `controller=free_timed/push_timed/push_correction_timed`、`position_command=0xa4`、步长、周期、schedule、中途 feedback_samples 及截断数；保留原动作末256条格式。
 
-Free 终点增加有限的原目标重申（2026-11-11 候选，待实机验证）：`hardware.free_timed_motion.goal_refresh.enabled=true`。仅在全部路径点已发送、尚未进入保持阶段时，逐轴观察新鲜角度及速度反馈；误差超过0.3°、速度≤1°/秒，连续0.6秒角度范围小于0.05°，才对该轴重发完全相同的最终A4目标和原速度字段，每轴最多2次。到位轴不重发；重发后重新等待该轴角度/速度新反馈，原5秒整定截止时间不延长。中途路径发送与阶段重试规则保持，Push/补推不启用这项措施。诊断中的 `goal_refresh` 记录每轴次数、时刻和重发前角差，动作的 `purpose=goal_refresh` 用于区分轨迹目标；`motion_commands_sent` 包含重发，`waypoints_dispatched` 只计路径点。它用于处理静止欠角时的终点重定位，不保证能够克服机构摩擦，也不是已确认的故障根因修复。离线验证：`PYTHONPATH=.:tests python3 -m unittest test_goal_refresh test_free_timed -q`。
+Free 终点原目标重申由 `hardware.free_timed_motion.goal_refresh.enabled` 控制。它仅在下发完成、尚未进入保持、且跟随偏差仍在允许范围内时运行。根据静止欠角判定只重发同轴原终点，每轴最多两次，沿用原整定截止时间。诊断中的 `goal_refresh` 记录次数、时刻和重发前角差。
 
-终点振荡三档降速（2026-11-15）：`hardware.free_timed_motion.oscillation_downshift` 配置低/中/高三档 `speed_tiers_deg_s=[18,30,60]`（电机轴°/秒），生产启用。Free、Push、push_correction 及使用Free的观测撤离，全部路径点发送完后，用原恢复机制的幅度/趋势/反向次数判据检查每轴新鲜角度和速度反馈：1.2秒窗口、至少3次有效反向、峰峰值≥0.12°、反向有效变化≥0.04°；距固定终点≤3.5°时才参与，覆盖c10104e6中约1.7°偏离的振荡。只对振荡轴按60→30→18逐档重发相同终点A4，每降一档清空历史，观察新的反馈窗口后才允许继续降档，不改目标角或关节折线。降档只在写入成功后生效，新档位作为该轴本任务后续进场、撤离和重试的速度上限；不会自动回升，新任务创建MotorPair后重新从高档上限开始，原配置速度更低时保持更低值。
+终点振荡三档降速：`hardware.free_timed_motion.oscillation_downshift` 配置 `speed_tiers_deg_s=[18,30,60]`，生产启用。Push和补推从60°/s起，可按既有幅度/趋势/反向判据逐档降到30、18；Free从18°/s起，已经处于最低档。判据使用1.2秒窗口、至少3次有效反向、峰峰值≥0.12°、反向有效变化≥0.04°，且距固定终点≤3.5°；只重发振荡轴相同终点A4，不改目标和关节折线。
 
-降档写入后重新等待该轴角度和速度反馈，清除旧稳定计时，但不延长原5秒整定/保持预算，不重置任务重试次数。低档仍不能稳定则沿用原超时和停机；不改PID、位置容差、视觉验收、释放或硬限检查。控制台记录`[motion] oscillation: upper speed 60 -> 30 deg/s`，诊断`execution.oscillation_downshift`记录逐轴当前上限、降档时间和原终点；A4动作标记`purpose=oscillation_downshift`。本地未部署的goal_refresh候选独立保留，不因本次降档自动启用到板端。离线验证：`PYTHONPATH=.:tests python3 -m unittest test_timed_downshift test_free_timed test_goal_qualification test_goal_refresh -q`。
+降档写入后重新等待该轴角度和速度反馈，清除旧稳定计时，但不延长原5秒整定/保持预算，不重置任务重试次数。低档仍不能稳定则沿用原超时和停机；不改PID、位置容差、视觉验收、释放或硬限检查。控制台记录`[motion] oscillation: upper speed 60 -> 30 deg/s`，诊断`execution.oscillation_downshift`记录逐轴当前上限、降档时间和原终点；A4动作标记`purpose=oscillation_downshift`。离线验证：`PYTHONPATH=.:tests python3 -m unittest test_timed_downshift test_free_timed test_goal_qualification test_goal_refresh -q`。
 
-旧 withdraw 等其它阶段沿用原 A6 执行器；新增 observation_retreat 使用上述 Free A4。用户已报告 Free 实机通过；本次扩展后的 Push 尚未试动。
-
-离线验证：`PYTHONPATH=.:tests python3 -m unittest discover -s tests -p test_free_timed.py -v`。旧版完整测试集的已知失败见交接记录，不能把虚拟回放写成实机通过。
+路径净距是模型采样值。跟随守卫的 2° 阈值用于及时停止大偏差，窄通道的实机碰撞余量需要现场验证。定时器记录计划和实际发令时间，轨迹速度是参考速度。
 
 ## 2026-11-06 当前恢复策略
 
@@ -105,13 +105,7 @@ bash run.sh
 
 ## 轨迹如何生成
 
-自由移动只使用三种有限路线：
-
-1. 等效接触点直接走笛卡尔直线。
-2. 经固定质量块通行姿态，再走直线到预接近位。
-3. 换面时，经导轨下方的固定高度通道绕到另一侧，形成最多三段直线。
-
-路线按固定顺序检查，受阻就尝试下一种；全部受阻则返回失败，不扩展搜索栅格。每段按不超过 1.00 mm 的距离取点并逆解，电机插值点之间也用简化包络检查。采用平滑时间进度，途中不逐点等待停稳。
+自由移动先检查关节直线、固定通行姿态与左推入口关节绕行。同组路线按最小名义净距比较。笛卡尔后备保留直连、经固定通行姿态和经导轨下方绕行三种配方。所有路线均受阻时返回 `free_path_not_found`。
 
 | 当前设置 | 值 |
 |---|---|
@@ -119,7 +113,7 @@ bash run.sh
 | 向左推 | 外面固定点，沿世界 X 在销心右侧 2.00 mm 预接近 |
 | 质量块通行姿态 | 大臂 148.00°、小臂 35.00° |
 | 换面通道高度 | 等效参考点 Y=135.00 mm |
-| 自由移动 / 推动 / 接近速度 | 20.00 mm/s / 5.00 mm/s / 2.00 mm/s，受关节速度上限约束 |
+| 自由移动 / 推动 / 接近参考速度 | 4.00°/s / 5.00 mm/s / 2.00 mm/s，受关节速度上限约束 |
 
 左推预接近 5 mm 会使侧板进入当前质量块区域，所以使用 2 mm。两面的偏移量分别配置。通行姿态下，质量块的平面投影落在夹爪上下板之间，实体保持高度间隙；名义下/上间隙约为 2.98/4.20 mm，尚未实机测量验收。
 

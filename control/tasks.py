@@ -23,7 +23,7 @@ def _finite_setting(value, name, minimum=0.):
 
 class TaskRunner:
     _relative_leg = None
-    _NO_RETRY = {"motion_halted", "stop_not_confirmed", "joint_feedback_out_of_limits",
+    _NO_RETRY = {"motion_halted", "timed_tracking_error", "stop_not_confirmed", "joint_feedback_out_of_limits",
                  "motion_goal_hold_hard_limit", "slider_overshot_target", "motion_already_running",
                  "verification_unreliable", "camera_frame_stale_after_detection"}
     # 运动到位判定失败但机械臂已停在目标附近的错误；端点任务中可由模型推头到位窗口吸收。

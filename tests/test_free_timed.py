@@ -8,7 +8,7 @@ from virtual_drive import VirtualDrive, config, phase, m
 from control.tasks import TaskRunner
 from control.protocol import (multi_turn_position_frame, parse_frame, make_frame,
                               state_from_reply)
-from control.trajectory import timed_free_points
+from control.trajectory import timed_free_points, trapezoidal_joint_points
 
 
 def settings(**extra):
@@ -165,7 +165,7 @@ class TimedFreeTests(unittest.TestCase):
                 self.assertEqual(targets(d, 1)[-1], 23.)
                 self.assertEqual(len(d.halts), 1)
 
-    def test_push_planner_uses_same_small_step_fixed_period_without_recovery_geometry(self):
+    def test_push_planner_uses_constant_cartesian_speed_without_recovery_geometry(self):
         from pathlib import Path
         from control.config import load_config
         from control.planner import Planner
@@ -176,11 +176,62 @@ class TimedFreeTests(unittest.TestCase):
         for name in ("push", "push_correction"):
             with self.subTest(phase=name):
                 planned = planner._phase(name, path, [1.], 1., direction="+x")
-                self.assertEqual(planned["time_parameterization"], "fixed_period_on_joint_polyline")
+                self.assertEqual(planned["time_parameterization"], "cartesian_constant_speed")
                 self.assertIsNone(planned["motion_recovery_geometry"])
-                self.assertEqual(len(planned["points"]), 6)
-                self.assertEqual(planned["points"][-1]["q_rad"], path[-1])
-                self.assertEqual(planned["points"][-1]["time_s"], .25)
+                points = planned["points"]
+                self.assertEqual(points[-1]["q_rad"], path[-1])
+                self.assertGreater(len(points), 2)
+                for a, b in zip(points, points[1:]):
+                    distance = math.dist(*(planner.arm.slider_center(p["q_rad"], "+x") for p in (a, b)))
+                    self.assertAlmostEqual(distance/(b["time_s"]-a["time_s"]), 1., places=6)
+
+    def test_free_trapezoid_keeps_corner_and_accelerates_and_brakes(self):
+        path = [list(map(math.radians, q)) for q in [[159, 20], [155, 22], [155, 26]]]
+        points = trapezoidal_joint_points(path, 4., 8., .05, [1, 2])
+        self.assertEqual(points[30][1], path[1])
+        self.assertEqual(points[-1], (3., path[-1]))
+        steps = [math.degrees(a[1][0]-b[1][0]) for a, b in zip(points[:30], points[1:31])]
+        self.assertGreater(steps[7], steps[0])
+        self.assertGreater(steps[21], steps[-1])
+        self.assertTrue(all(0. <= step <= .2+1e-9 for step in steps))
+        self.assertTrue(all(p[1][0] == path[1][0] for p in points[30:]))
+
+    def test_physical_schedule_preserves_points_and_uses_named_a4_cap(self):
+        cfg = settings()
+        cfg["free_timed_motion"]["free_a4_limit_deg_s"] = 18.
+        d = VirtualDrive(settings=cfg)
+        planned = phase([[159, 20], [158.8, 20.2], [158.3, 20.7]], times=[0, .22, .55])
+        planned["time_parameterization"] = "joint_trapezoid"
+        execution = d.run(planned)["motion_diagnostics"]["execution"]
+        self.assertEqual(targets(d), [158.8, 158.3])
+        self.assertEqual([row["planned_time_s"] for row in execution["schedule"]], [.22, .55])
+        self.assertTrue(all(int.from_bytes(w[13:17], "little") == 1800 for *_, w in d.a4()))
+        self.assertTrue(all(b[0]-a[0] >= .33-1e-8 for a, b in zip(d.a4(0), d.a4(0)[1:])))
+
+    def test_physical_tracking_abort_stops_early_in_all_timed_phases(self):
+        for name, law in (("free", "joint_trapezoid"), ("push", "cartesian_constant_speed"),
+                          ("push_correction", "cartesian_constant_speed")):
+            with self.subTest(phase=name):
+                d = VirtualDrive(settings=settings(), immobile=True)
+                planned = phase([[159, 20], [158, 20.2], [157, 20.4], [156, 20.6]],
+                                times=[0., .25, .5, .75], name=name)
+                planned["time_parameterization"] = law
+                with self.assertRaises(m.HardwareError) as caught:
+                    d.run(planned, real_halt=True)
+                self.assertEqual(caught.exception.reason, "timed_tracking_error")
+                self.assertEqual(caught.exception.details["motor"], "upper")
+                self.assertEqual(targets(d), [158., 157.])
+                self.assertEqual([axis for _, axis, cmd, _ in d.frames if cmd == 0x81], [0, 1])
+
+    def test_task_never_retries_timed_tracking_abort(self):
+        runner = TaskRunner.__new__(TaskRunner)
+        runner.config = {"retry_limit": 3}
+        runner.motors = Mock()
+        runner.motors.halt.return_value = {"stopped_confirmed": True}
+        action = Mock(side_effect=m.HardwareError("timed_tracking_error"))
+        with self.assertRaisesRegex(m.HardwareError, "timed_tracking_error"):
+            runner._stage("free", {}, {}, action)
+        action.assert_called_once()
 
     def test_noop_path_qualifies_without_motion(self):
         d = VirtualDrive(settings=settings())

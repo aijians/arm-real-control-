@@ -1,4 +1,4 @@
-"""Fixed-scene Cartesian lines, with one configured obstacle passage.
+"""Finite Free routes and fixed-scene Cartesian contact paths.
 
 All positions are mm in the shoulder frame; q2 is the physical BAC angle.
 Free motion uses the selected face's rigid equivalent point, including the
@@ -17,7 +17,7 @@ import time
 from .config import resolve, push_correction_settings
 from .kinematics import PlanarArm
 from .scene import SimpleScene
-from .trajectory import timed_free_points
+from .trajectory import trapezoidal_joint_points
 
 
 class PlanError(RuntimeError):
@@ -57,15 +57,37 @@ class Planner:
         scene_config = json.loads(resolve(self.root, self.config["paths"]["scene"]).read_text())
         self.scene = SimpleScene(scene_config)
         self.routes = scene_config["routes"]
+        raw_entry = self.routes.get("left_entry_raw_motor_deg")
+        if raw_entry is not None and (not isinstance(raw_entry, list) or len(raw_entry) != 2
+                or any(type(v) not in (int, float) or not math.isfinite(v) for v in raw_entry)):
+            raise PlanError("invalid_left_entry_raw_motor_deg")
         self.offsets = {d: float(self.config["kinematics"]["faces"][d]["approach_offset_mm"]) for d in ("+x", "-x")}
         if any(not math.isfinite(v) or v <= 0 for v in self.offsets.values()):
             raise PlanError("invalid_approach_offset")
         hardware = self.config.get("hardware", {})
         ratios = [abs(float(m.get("ratio", 1))) for m in hardware.get("motors", [])] or [1.]
+        self.max_model_speed = float(hardware.get("max_speed_deg_s", self.settings["free_speed_deg_s"])) / max(ratios)
         self.joint_rate = math.radians(min(float(self.settings["free_speed_deg_s"]),
-            float(hardware.get("max_speed_deg_s", self.settings["free_speed_deg_s"])) / max(ratios)))
+                                          self.max_model_speed))
         if not math.isfinite(self.joint_rate) or self.joint_rate <= 0:
             raise PlanError("invalid_joint_rate")
+        timed = hardware.get("free_timed_motion", {})
+        self.timed_enabled = timed.get("enabled", False)
+        period = timed.get("period_s", .05)
+        command_rate = hardware.get("command_rate_hz", 50.)
+        if any(type(value) not in (int, float) or not math.isfinite(value) or value <= 0
+               for value in (period, command_rate)):
+            raise PlanError("invalid_timed_command_period")
+        self.timed_period = max(period, 1/command_rate)
+        self.free_trajectory_speed = self.settings.get("free_trajectory_speed_deg_s", 4.)
+        self.free_trajectory_accel = self.settings.get("free_trajectory_accel_deg_s2", 8.)
+        for key, value in (("free_trajectory_speed_deg_s", self.free_trajectory_speed),
+                           ("free_trajectory_accel_deg_s2", self.free_trajectory_accel)):
+            if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+                raise PlanError("invalid_planning_parameter:" + key)
+        if self.free_trajectory_speed > self.max_model_speed and (
+                self.timed_enabled or "free_trajectory_speed_deg_s" in self.settings):
+            raise PlanError("free_trajectory_speed_exceeds_motor_limit")
 
     def _q(self, value):
         try:
@@ -231,7 +253,7 @@ class Planner:
                     break
         return [points[index] for index in selected], selected
 
-    def _phase(self, name, path, distances, speed, *, _collision_context=None, **metadata):
+    def _legacy_points(self, name, path, distances, speed, direction, context):
         retained, costs = [list(path[0])], [0.]
         for i, q in enumerate(path[1:]):
             joint_time = max(abs(b-a) for a, b in zip(path[i], q)) / self.joint_rate
@@ -246,30 +268,54 @@ class Planner:
             points = [{"q_rad": q, "time_s": duration * self._inverse_smoothstep(c / costs[-1])}
                       for q, c in zip(retained, costs)]
         dense_count = len(points)
-        points, source_indices = self._command_points(
-            name, points, metadata.get("direction", "+x"), _collision_context)
-        recovery_geometry = None
+        points, source_indices = self._command_points(name, points, direction, context)
+        return points, dense_count, source_indices
+
+    def _phase(self, name, path, distances, speed, *, _collision_context=None, _joint_stops=None, **metadata):
+        direction = metadata.get("direction", "+x")
         hardware = self.config.get("hardware", {})
-        timed = hardware.get("free_timed_motion", {})
-        timing = "quintic_progress_on_joint_polyline"
-        if name in ("free", "push", "push_correction") and timed.get("enabled", False):
-            try:
-                points = [{"time_s": t, "q_rad": q} for t, q in timed_free_points(
-                    [(p["time_s"], p["q_rad"]) for p in points],
-                    timed.get("max_step_deg", .2), timed.get("period_s", .05))]
-            except ValueError as exc:
-                raise PlanError(str(exc)) from exc
-            source_indices = None  # Subdivided nodes are between source vertices.
-            timing = "fixed_period_on_joint_polyline"
+        timed_motion = hardware.get("free_timed_motion", {}).get("enabled", False)
+        if timed_motion and name == "free":
+            timed = trapezoidal_joint_points(path, self.free_trajectory_speed,
+                self.free_trajectory_accel, self.timed_period,
+                (len(path)-1,) if _joint_stops is None else _joint_stops)
+            points = [{"time_s": t, "q_rad": q} for t, q in timed]
+            dense_count, source_indices, timing = len(path), None, "joint_trapezoid"
+            metadata.update(trajectory_speed_deg_s=self.free_trajectory_speed,
+                            trajectory_accel_deg_s2=self.free_trajectory_accel)
+        elif timed_motion and name in ("push", "push_correction"):
+            end = self.arm.slider_center(path[-1], direction)
+            length = math.dist(self.arm.slider_center(path[0], direction), end)
+            duration = max(length/speed, self.timed_period) if length > 1e-12 else 0.
+            count = math.floor(duration/self.timed_period+1e-12)
+            samples = path[:1]
+            if count:
+                samples, _ = self._line(path[0], end, direction, q_goal=path[-1], count=count)
+            interval = duration/count if count else 0.
+            points = [{"time_s": i*interval, "q_rad": q} for i, q in enumerate(samples)]
+            dense_count, source_indices, timing = len(path), None, "cartesian_constant_speed"
+            metadata.update(trajectory_speed_mm_s=length/points[-1]["time_s"] if count else 0.,
+                            requested_trajectory_speed_mm_s=speed)
+            for a, b in zip(samples, samples[1:]):
+                if max(abs(math.degrees(v-u)) for u, v in zip(a, b)) > self.max_model_speed*interval+1e-9:
+                    raise PlanError("cartesian_speed_exceeds_motor_limit")
+                if not self._command_chord_clear(name, a, b, direction, _collision_context):
+                    raise PlanError("timed_cartesian_chord_not_clear")
+        else:
+            points, dense_count, source_indices = self._legacy_points(
+                name, path, distances, speed, direction, _collision_context)
+            timing = "quintic_progress_on_joint_polyline"
+        recovery_geometry = None
         if (_collision_context is not None and _collision_context[1]
                 and _collision_context[1].get("moving_target")):
-            self._checked_edges([p["q_rad"] for p in points], *_collision_context)
+            if timing != "cartesian_constant_speed":
+                self._checked_edges([p["q_rad"] for p in points], *_collision_context)
             face = self.config["kinematics"]["faces"][metadata["direction"]]
             metadata["minimum_stem_coverage_mm"] = face.get("minimum_stem_coverage_mm", 0.)
             metadata["contact_collision_model"] = "moving_stem_on_fixed_rail_y"
         policy_enabled = (hardware.get("motion_recovery", {}).get("enabled", False)
                           and not (name in ("free", "push", "push_correction")
-                                   and timed.get("enabled", False)))
+                                   and timed_motion))
         if policy_enabled and _collision_context is not None:
             positions, contact = _collision_context
             recovery_geometry = {"scene": copy.deepcopy(self.scene.config),
@@ -319,19 +365,24 @@ class Planner:
         if margin < required - 1e-9:
             raise PlanError("insufficient_finite_face_stem_coverage")
 
-    def _checked_edges(self, path, sliders, contact=None):
+    def _edge_samples(self, path):
         # Motors interpolate angles between Cartesian IK samples. Check that
         # short joint chord too, using only the lightweight scene primitives.
         step = math.radians(self.settings["collision_step_deg"])
-        self._clear(path[0], sliders, contact)
+        yield path[0]
         for a, b in zip(path, path[1:]):
             count = max(1, math.ceil(max(abs(y-x) for x, y in zip(a, b)) / step))
             for i in range(1, count + 1):
-                self._clear([x+(y-x)*i/count for x, y in zip(a, b)], sliders, contact)
+                yield b if i == count else [x+(y-x)*i/count for x, y in zip(a, b)]
 
-    def _line(self, q_start, target, direction, contact=True, q_goal=None):
+    def _checked_edges(self, path, sliders, contact=None):
+        for q in self._edge_samples(path):
+            self._clear(q, sliders, contact)
+
+    def _line(self, q_start, target, direction, contact=True, q_goal=None, *, count=None):
         centre = list(self.arm.slider_center(q_start, direction))
-        count = max(1, math.ceil(math.dist(centre, target) / self.settings["linear_step_mm"]))
+        if count is None:
+            count = max(1, math.ceil(math.dist(centre, target) / self.settings["linear_step_mm"]))
         path, distances, previous = [list(q_start)], [], centre
         for i in range(1, count + 1):
             c = [a+(b-a)*i/count for a, b in zip(centre, target)]
@@ -345,7 +396,7 @@ class Planner:
             previous = c
         return path, distances
 
-    def _free_route(self, start, targets, positions, direction):
+    def _free_route(self, start, targets, positions, direction, stops=None):
         path, distances = [start], []
         for goal in targets:
             part, steps = self._line(path[-1], self.arm.slider_center(goal, direction),
@@ -353,17 +404,11 @@ class Planner:
             self._checked_edges(part, positions)
             path.extend(part[1:])
             distances.extend(steps)
+            if stops is not None:
+                stops.append(len(path)-1)
         return path, distances
 
-    def free(self, q_start, q_goal, sliders, direction="+x", *, all_slider_limits=None):
-        started = time.monotonic()
-        start, goal, positions = self._q(q_start), self._q(q_goal), self._positions(sliders)
-        if direction not in ("+x", "-x"):
-            raise PlanError("invalid_contact_direction")
-        self._clear(start, positions)
-        self._clear(goal, positions)
-        passage = self._q([math.radians(a) for a in self.routes["passage_q_deg"]])
-        # Finite, fixed recipes only. Never search a configuration grid.
+    def _cartesian_free_recipes(self, start, goal, direction, passage):
         via = [passage, goal]
         right = self.arm.slider_center(goal, direction)[0] >= self.routes["right_region_x_min_mm"]
         candidates = [("passage", via), ("direct", [goal])] if right else [("direct", [goal]), ("passage", via)]
@@ -383,23 +428,80 @@ class Planner:
                     break
         else:
             candidates.append(("rail_entry", entry + [goal]))
+        return candidates
+
+    def _joint_free_recipes(self, start, goal, direction, passage):
+        candidates = [("joint_linear", [goal]), ("joint_passage", [passage, goal])]
+        raw = self.routes.get("left_entry_raw_motor_deg")
+        motors = self.config.get("hardware", {}).get("motors", [])
+        if (raw is not None and len(motors) == 2 and direction == "-x"
+                and self.arm.slider_center(goal, direction)[1] > self.routes["entry_y_mm"]):
+            upper, lower = [math.radians((angle-motor["offset_deg"])/(motor["sign"]*motor["ratio"]))
+                            for angle, motor in zip(raw, motors)]
+            candidates.append(("joint_left_entry", [[upper, start[1]], [upper, lower], goal]))
+        return candidates
+
+    def _free_candidate(self, name, start, targets, positions, direction, *, joint, all_slider_limits, upper_bound):
+        stops = []
+        if joint:
+            path = [start] + [self._q(q) for q in targets]
+            self._checked_edges(path, positions)
+            stops = list(range(1, len(path)))
+            if not self.timed_enabled:  # Legacy A6 needs intermediate targets as well.
+                path = list(self._edge_samples(path))
+            xy = [self.arm.slider_center(q, direction) for q in path]
+            distances = [math.dist(a, b) for a, b in zip(xy, xy[1:])]
+        else:
+            path, distances = self._free_route(start, targets, positions, direction, stops)
+        phase = self._phase("free", path, distances, self.settings["free_speed_mm_s"],
+            _collision_context=(positions, None), _joint_stops=stops,
+            direction=direction, route=name, collision_checked=True,
+            slider_positions_x_mm=positions, joint_waypoints_rad=[start] + targets,
+            cartesian_waypoints_mm=[list(self.arm.slider_center(q, direction)) for q in [start] + targets])
+        command_path = [p["q_rad"] for p in phase["points"]]
+        clearance = upper_bound
+        for sample in self._edge_samples(command_path):
+            self._clear(sample, positions)
+            clearance = self.scene.clearance_mm(sample, positions, clearance)
+        if all_slider_limits is not None:
+            self._checked_return_edges(command_path, direction, positions, all_slider_limits)
+            phase["slider_rail_bounds_x_mm"] = {c: list(bounds) for c, bounds in all_slider_limits.items()}
+        phase["minimum_clearance_mm"] = clearance
+        return phase
+
+    def free(self, q_start, q_goal, sliders, direction="+x", *, all_slider_limits=None):
+        started = time.monotonic()
+        start, goal, positions = self._q(q_start), self._q(q_goal), self._positions(sliders)
+        if direction not in ("+x", "-x"):
+            raise PlanError("invalid_contact_direction")
+        self._clear(start, positions)
+        self._clear(goal, positions)
+        passage = self._q([math.radians(a) for a in self.routes["passage_q_deg"]])
+        # Joint recipes have priority. Rank feasible routes by clearance within
+        # that family; direct wins ties. Keep Cartesian recipes as a fallback.
+        upper_bound = min(self.scene.clearance_mm(q, positions) for q in (start, goal))
         failures = []
-        for route_name, targets in candidates:
-            try:
-                path, distances = self._free_route(start, targets, positions, direction)
-                phase = self._phase("free", path, distances, self.settings["free_speed_mm_s"],
-                    _collision_context=(positions, None),
-                    direction=direction, route=route_name, collision_checked=True,
-                    slider_positions_x_mm=positions, planning_elapsed_s=time.monotonic()-started,
-                    cartesian_waypoints_mm=[list(self.arm.slider_center(q, direction)) for q in [start] + targets])
-                if all_slider_limits is not None:
-                    self._checked_return_edges([p["q_rad"] for p in phase["points"]],
-                                               direction, positions, all_slider_limits)
-                    phase["slider_rail_bounds_x_mm"] = {c: list(bounds)
-                        for c, bounds in all_slider_limits.items()}
-                return phase
-            except PlanError as exc:
-                failures.append(str(exc))
+        scores = []
+        for joint, recipes in ((True, self._joint_free_recipes), (False, self._cartesian_free_recipes)):
+            best = None
+            for name, targets in recipes(start, goal, direction, passage):
+                try:
+                    candidate = self._free_candidate(name, start, targets, positions, direction,
+                        joint=joint, all_slider_limits=all_slider_limits, upper_bound=upper_bound)
+                except PlanError as exc:
+                    failures.append(str(exc))
+                    scores.append({"route": name, "failure": str(exc)})
+                    continue
+                margin = candidate["minimum_clearance_mm"]
+                scores.append({"route": name, "minimum_clearance_mm": margin})
+                if best is None or margin > best["minimum_clearance_mm"] + 1e-9:
+                    best = candidate
+                # All routes share these endpoints so none can exceed this gap.
+                if margin >= upper_bound - 1e-9:
+                    break
+            if best is not None:
+                best.update(planning_elapsed_s=time.monotonic()-started, candidate_clearances=scores)
+                return best
         raise PlanError("free_path_not_found:" + " | ".join(failures))
 
     def precontact(self, color, direction, sliders, seed):

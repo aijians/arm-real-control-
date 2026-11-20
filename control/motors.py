@@ -5,6 +5,7 @@ port never enables, homes, or writes an encoder zero. Linux standard library
 only; the protocol is the one already used by the board's existing program.
 """
 
+from bisect import bisect_right
 from collections import deque
 import fcntl
 import math
@@ -15,7 +16,8 @@ import termios
 import threading
 import time
 
-from .trajectory import WaypointCursor, GoalQualification, timed_free_points, return_goal_lower_bounds
+from .trajectory import (PHYSICAL_TIMING, WaypointCursor, GoalQualification,
+                         timed_free_points, return_goal_lower_bounds)
 from .kinematics import PlanarArm
 from .recovery import SpeedRecovery, recovery_settings
 from .timed_downshift import TimedSpeedDownshift, timed_downshift_settings
@@ -59,6 +61,11 @@ class _MotionTrace:
                      "end_q_deg": [math.degrees(q) for q in points[-1][1]]}
         self.plan.update(waypoint_min_axis_step_deg=phase.get("waypoint_min_axis_step_deg"),
                          protected_micro_steps=phase.get("protected_micro_steps", []))
+        for key in ("route", "free_route", "minimum_clearance_mm", "candidate_clearances",
+                    "planning_elapsed_s", "time_parameterization", "trajectory_speed_deg_s",
+                    "trajectory_accel_deg_s2", "trajectory_speed_mm_s", "requested_trajectory_speed_mm_s"):
+            if key in phase:
+                self.plan[key] = phase[key]
         self.actions = deque(maxlen=self.MAX_ACTIONS)
         self.action_count = 0
         self.counts = {m["name"]: {"sent": 0, "skipped": 0, "send_failed": 0}
@@ -346,15 +353,23 @@ class MotorPair:
         self.free_timed = timed.get("enabled", False)
         self.timed_downshift_config = timed_downshift_settings(timed)
         self.goal_refresh = goal_refresh_settings(timed)
-        self.free_timed_speed = _finite(timed.get("speed_deg_s", 10.),
-                                        "free_timed_motion.speed_deg_s")
-        # Free has its own fixed A4 speed, independent of the legacy executor cap.
-        if not 0 < self.free_timed_speed <= 360:
-            raise ValueError("invalid free_timed_motion.speed_deg_s")
-        self.push_upper_speed = _finite(timed.get("push_upper_speed_deg_s", self.free_timed_speed),
-                                        "free_timed_motion.push_upper_speed_deg_s")
-        if not 0 < self.push_upper_speed <= 360:
-            raise ValueError("invalid free_timed_motion.push_upper_speed_deg_s")
+        def a4_limit(name, legacy, default):
+            key = "free_timed_motion." + name
+            value = _finite(timed.get(name, timed.get(legacy, default)), key)
+            if not 0 < value <= 360:
+                raise ValueError("invalid " + key)
+            return value
+
+        self.free_timed_speed = a4_limit("free_a4_limit_deg_s", "free_speed_deg_s",
+                                         timed.get("speed_deg_s", 10.))
+        self.push_timed_speed = a4_limit("push_a4_limit_deg_s", "push_speed_deg_s",
+                                         timed.get("speed_deg_s", self.free_timed_speed))
+        self.push_upper_speed = a4_limit("push_upper_a4_limit_deg_s", "push_upper_speed_deg_s",
+                                         self.push_timed_speed)
+        self.timed_tracking_abort = _finite(timed.get("tracking_abort_deg", 2.),
+                                            "free_timed_motion.tracking_abort_deg")
+        if self.timed_tracking_abort <= 0.:
+            raise ValueError("invalid free_timed_motion.tracking_abort_deg")
         self.free_timed_step = _finite(timed.get("max_step_deg", .2),
                                        "free_timed_motion.max_step_deg")
         self.free_timed_period = _finite(timed.get("period_s", .05),
@@ -1125,8 +1140,13 @@ class MotorPair:
         return math.hypot(a[0]-b[0], a[1]-b[1]) <= .1+1e-9
 
     def _timed_speed(self, motor, phase):
-        base = (self.push_upper_speed if phase in ("push", "push_correction")
-                and motor["name"] == "upper" else self.free_timed_speed)
+        if phase == "free":
+            base = self.free_timed_speed
+        elif phase in ("push", "push_correction"):
+            base = (self.push_upper_speed if motor["name"] == "upper"
+                    else self.push_timed_speed)
+        else:
+            base = self.free_timed_speed
         return self._timed_downshift.speed(motor["name"], base)
 
     def _send_timed_target(self, q_rad, trace, *, axes=None, purpose="trajectory", speed_limits=None):
@@ -1164,9 +1184,11 @@ class MotorPair:
         return sent
 
     def _move_timed(self, phase, health_check=None):
-        """Send small A4 targets at a fixed period; qualify only the end."""
-        points = timed_free_points(self._validate_phase(phase),
-                                   self.free_timed_step, self.free_timed_period)
+        """Dispatch the certified physical schedule and guard measured following error."""
+        physical = phase.get("time_parameterization") in PHYSICAL_TIMING
+        points = self._validate_phase(phase)
+        if not physical:
+            points = timed_free_points(points, self.free_timed_step, self.free_timed_period)
         trace = _MotionTrace(phase, points, self.config, self.motors)
         name = phase["phase"]
         controller = name + "_timed"
@@ -1194,7 +1216,10 @@ class MotorPair:
         sample_count = 0
         trace.execution.update(controller=controller, stage="tracking",
                                position_command="0xa4",
-                               default_speed_deg_s=self.free_timed_speed,
+                               time_parameterization=phase.get("time_parameterization"),
+                               tracking_abort_limit_deg=self.timed_tracking_abort if physical else None,
+                               default_speed_deg_s=(self.free_timed_speed if name == "free"
+                                                    else self.push_timed_speed),
                                fixed_axis_speed_deg_s={m["name"]: self._timed_speed(m, name)
                                                        for m in self.motors},
                                max_step_deg=self.free_timed_step,
@@ -1213,17 +1238,30 @@ class MotorPair:
             started = time.monotonic()
             trace.started = started
             target, elapsed = points[0][1], 0.
+            command_times = [[-math.inf] for _ in self.motors]
+            command_angles = [[math.degrees(q)] for q in target]
+            checked_stamp = [-math.inf] * len(self.motors)
             index = 1
             next_feedback = started
             last_sample_stamp = None
-            dispatch_period = max(self.free_timed_period, 1/self.config["command_rate_hz"])
-            last_write = started - dispatch_period
+            minimum_dispatch_period = max(self.free_timed_period, 1/self.config["command_rate_hz"])
+            dispatch_due = started + (points[1][0] if len(points) > 1 else 0.)
             end_at = None
             confirmation_after = None
             qualifier = GoalQualification(self.config["angle_tolerance_deg"],
                 self.config["still_speed_deg_s"], self.config["goal_hold_s"], self.config["stable_s"],
                 lower_bounds_deg=return_goal_lower_bounds(phase))
             deadline = started + points[-1][0] + self.config["move_timeout_margin_s"]
+
+            def check_error(axis, expected_deg, sample_stamp, basis):
+                actual_deg = math.degrees(state["q_rad"][axis])
+                if abs(actual_deg-expected_deg) > self.timed_tracking_abort + 1e-9:
+                    raise HardwareError("timed_tracking_error", {
+                        "motor": self.motors[axis]["name"], "actual_deg": actual_deg,
+                        "reference_deg": expected_deg, "error_deg": actual_deg-expected_deg,
+                        "limit_deg": self.timed_tracking_abort, "feedback_stamp_s": sample_stamp,
+                        "basis": basis, "next_waypoint_index": index})
+
             while True:
                 if self._halt_event.is_set():
                     raise HardwareError("motion_halted")
@@ -1235,6 +1273,13 @@ class MotorPair:
                     next_feedback = time.monotonic() + 1/self.config["feedback_rate_hz"]
                 self._pump(0)
                 state = self._snapshot()
+                if physical:
+                    for axis, feedback in enumerate(self._feedback):
+                        stamp = feedback["angle_stamp"]
+                        if stamp > checked_stamp[axis]:
+                            slot = bisect_right(command_times[axis], stamp)-1
+                            check_error(axis, command_angles[axis][slot], stamp, "dispatched_target")
+                            checked_stamp[axis] = stamp
                 if state["stamp_monotonic_s"] != last_sample_stamp:
                     samples.append({"elapsed_s": time.monotonic()-started,
                         "axis_stamp_monotonic_s": list(state["axis_stamp_monotonic_s"]),
@@ -1247,11 +1292,13 @@ class MotorPair:
                 now = time.monotonic()
                 if index < len(points) and now >= deadline:
                     raise HardwareError(controller + "_schedule_timeout")
-                # No measured error, progress, speed, or acknowledgement gates
-                # advancement. Late nodes stay ordered; never burst or drop them.
-                if (index < len(points) and now-started >= points[index][0]
-                        and now-last_write >= dispatch_period):
-                    elapsed, target = points[index]
+                # Late nodes stay ordered and keep their planned spacing.
+                if index < len(points) and now >= dispatch_due:
+                    next_elapsed, next_target = points[index]
+                    if physical:
+                        for axis, q in enumerate(next_target):
+                            check_error(axis, math.degrees(q), checked_stamp[axis], "next_target")
+                    elapsed, target = next_elapsed, next_target
                     last_write = time.monotonic()
                     written = self._send_timed_target(target, trace)
                     sent_count += written
@@ -1260,7 +1307,16 @@ class MotorPair:
                         "write_started_elapsed_s": last_write-started,
                         "write_completed_elapsed_s": completed-started,
                         "lateness_s": completed-started-elapsed, "axes_written": written})
+                    if physical:
+                        for axis, (motor, q) in enumerate(zip(self.motors, target)):
+                            wire_deg = round(self._motor_deg(motor, math.degrees(q))*100)/100
+                            command_times[axis].append(self._last_target_sent_at[axis])
+                            command_angles[axis].append(
+                                (wire_deg-motor["offset_deg"])/(motor["sign"]*motor["ratio"]))
                     index += 1
+                    if index < len(points):
+                        delay = max(minimum_dispatch_period, points[index][0]-elapsed)
+                        dispatch_due = max(started+points[index][0], last_write+delay)
                 trace.execution.update(next_waypoint_index=index,
                     waypoints_dispatched=len(schedule), motion_commands_sent=sent_count)
                 if index == len(points):
@@ -1338,8 +1394,7 @@ class MotorPair:
                             trace.execution["motion_commands_sent"] = sent_count
                 wait_s = .005
                 if index < len(points):
-                    due = max(started+points[index][0], last_write+dispatch_period)
-                    wait_s = min(wait_s, max(0., due-time.monotonic()))
+                    wait_s = min(wait_s, max(0., dispatch_due-time.monotonic()))
                 self._pump(wait_s)
         except BaseException as exc:
             trace.execution.update(feedback_samples=list(samples),

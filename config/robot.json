@@ -1,6 +1,8 @@
 {
   "planning": {
     "free_speed_deg_s": 10.0,
+    "free_trajectory_speed_deg_s": 4.0,
+    "free_trajectory_accel_deg_s2": 8.0,
     "push_speed_mm_s": 5.0,
     "contact_speed_mm_s": 2.0,
     "linear_step_mm": 1.0,
@@ -152,8 +154,10 @@
     },
     "free_timed_motion": {
       "enabled": true,
-      "speed_deg_s": 60.0,
-      "push_upper_speed_deg_s": 60.0,
+      "free_a4_limit_deg_s": 18.0,
+      "push_a4_limit_deg_s": 60.0,
+      "push_upper_a4_limit_deg_s": 60.0,
+      "tracking_abort_deg": 2.0,
       "max_step_deg": 0.2,
       "period_s": 0.05,
       "oscillation_downshift": {

@@ -38,6 +38,7 @@
     ],
     "right_region_x_min_mm": 0.0,
     "entry_y_mm": 135.0,
+    "left_entry_raw_motor_deg": [154.43, 37.75],
     "passage_note": "Mass block XY overlaps the separated gripper plates; the block fits their Z opening. Nominal lower/upper vertical gaps are 2.98/4.20 mm."
   },
   "obstacles": [

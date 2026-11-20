@@ -55,6 +55,14 @@ def _separation(first, second):
         margins.extend(np.maximum(b.min(0) - a.max(0), a.min(0) - b.max(0)))
     return float(max(margins))
 
+
+def _point_edge_distance(points, polygon):
+    edges = np.roll(polygon, -1, axis=0) - polygon
+    offset = points[:, None, :] - polygon
+    fraction = np.clip(np.sum(offset*edges, axis=2)/np.sum(edges*edges, axis=1), 0., 1.)
+    return float(np.linalg.norm(offset-fraction[..., None]*edges, axis=2).min())
+
+
 class SimpleScene:
     def __init__(self, config):
         self.config=config
@@ -115,6 +123,47 @@ class SimpleScene:
 
     def path_free(self,q_path,sliders=None,contact=None):
         return all(self.check(q,sliders,contact) is None for q in q_path)
+
+    def clearance_mm(self, q, sliders, limit=math.inf):
+        """Minimum wall or planar gap to bodies at intersecting heights."""
+        shapes = [(poly, None, lo, hi, poly.min(0), poly.max(0))
+                  for _, poly, lo, hi in self.obstacles]
+        for position in sliders.values():
+            center = np.asarray(position if isinstance(position, (list, tuple, np.ndarray))
+                                else [position, 155.], float)
+            for item in self.slider_shapes:
+                lo, hi = item["z_mm"]
+                if item["shape"] == "circle":
+                    radius = item["radius_mm"]
+                    shapes.append((center, radius, lo, hi, center-radius, center+radius))
+                else:
+                    poly = _box(center, item["size_xy_mm"])
+                    shapes.append((poly, None, lo, hi, poly.min(0), poly.max(0)))
+        bodies = self.transformed_bodies(q)
+        if not bodies:
+            return limit
+        lows = np.asarray([poly.min(0) for _, poly in bodies])
+        highs = np.asarray([poly.max(0) for _, poly in bodies])
+        z = np.asarray([item["z_mm"] for item, _ in bodies])
+        gap = min(limit, float((lows-self.workspace[0]).min()),
+                  float((self.workspace[1]-highs).min()))
+        if gap <= 0.:
+            return gap
+        for shape, radius, zlo, zhi, lo, hi in shapes:
+            bbox_delta = np.maximum(0., np.maximum(lo-highs, lows-hi))
+            close = (z[:, 0] < zhi) & (z[:, 1] > zlo) & (np.sum(bbox_delta**2, axis=1) < gap**2)
+            for index in np.flatnonzero(close):
+                poly = bodies[index][1]
+                if radius is not None:
+                    distance = (0. if _inside_convex(shape, poly)
+                                else _point_edge_distance(shape[None, :], poly))
+                    gap = min(gap, max(0., distance-radius))
+                elif _overlap(poly, shape):
+                    return 0.
+                else:
+                    gap = min(gap, _point_edge_distance(poly, shape),
+                              _point_edge_distance(shape, poly))
+        return gap
 
     def slider_sweep_margins(self, q, y_mm, x_limits):
         """Conservative boxes cover every target position along its rail.
